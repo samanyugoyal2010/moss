@@ -137,6 +137,9 @@ examples/
 │   └── custom_embedding_sample.ts
 ├── javascript-web/          # Browser / WASM SDK samples
 ├── c/                       # C SDK samples (libmoss)
+├── voice-agents/            # End-to-end voice agents (ambient + multi-agent)
+│   ├── airline-pnr/         # Ambient retrieval; per-PNR Moss indexes, swap mid-call
+│   └── mortgage-lending/    # Multi-agent flow with shared session state
 └── cookbook/                # Framework integrations
     ├── langchain/           # LangChain retriever
     ├── dspy/                # DSPy module
@@ -157,6 +160,16 @@ apps/
 ├── moss-llamaindex/         # LlamaIndex RAG backend + frontend
 ├── moss-bun/                # Bun runtime example
 └── docker/                  # Dockerized examples (ECS/K8s pattern)
+
+moss-live-labs/              # Experimental zone: prototypes and community demos
+├── python/                  # Minimal Python quickstart + advanced query example
+├── typescript/              # Minimal TypeScript quickstart + advanced query example
+├── examples/                # Larger experiments (image search, voice agents)
+│   ├── voice-agent/         # LiveKit + Moss voice assistant
+│   ├── advanced-voice-agent/ # Persona impersonator built on a PDF knowledge base
+│   └── image-search/        # FastAPI + React image search over COCO
+└── community-demos/         # Community-contributed projects
+    └── voice-agents/        # bharat-benefits, shoplabs-voice-agent
 ```
 
 ### Run the Python examples
