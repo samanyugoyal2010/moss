@@ -13,7 +13,7 @@ live session that remembers what you say. Watch both panels on the right.
 **[Click Start planning. The agent greets you.]**
 
 ## 2 · Tell it about the trip (0:12–0:40)
-budget's around two thousand five hundred dollars a person,
+> "We're a family of four, our budget's around two thousand five hundred dollars a person,
 > we love beaches, and we want to travel the first week of December."
 
 **[Point at the "This call · live session" panel filling up as you talk.]**

@@ -178,12 +178,13 @@ async def entrypoint(ctx: JobContext):
 
     client = MossClient(project_id=MOSS_PROJECT_ID, project_key=MOSS_PROJECT_KEY)
 
-    # Long-term: the pre-loaded catalog, shared across all calls.
+    # Long-term: the pre-loaded catalog, shared across all calls. Fatal if missing
+    # so the worker doesn't keep taking calls with an empty catalog.
     try:
         await client.load_index(CATALOG_INDEX)
         logger.info(f"Loaded catalog index: {CATALOG_INDEX}")
     except Exception as e:
-        logger.warning(f"Catalog not found ({e}). Run seed_index.py first.")
+        raise SystemExit(f"Catalog index '{CATALOG_INDEX}' not available ({e}). Run seed_index.py first.")
 
     # Short-term: a fresh, empty session just for this call. The uuid suffix keeps
     # it unique even if two calls start in the same second.
