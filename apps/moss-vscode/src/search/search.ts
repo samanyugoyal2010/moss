@@ -42,15 +42,21 @@ export function mapHit(doc: QueryResultDocumentInfo): SearchHit {
 }
 
 export class SemanticSearch {
-  constructor(private getSession: () => SessionIndex | undefined) {}
+  constructor(
+    private getSession: () => SessionIndex | undefined,
+    private canSearch: () => boolean,
+  ) {}
 
   async query(text: string): Promise<SearchHit[]> {
-    const session = this.getSession();
-    if (!session) {
-      throw new Error("Moss session is not ready");
-    }
     const trimmed = text.trim();
     if (!trimmed) {
+      return [];
+    }
+    if (!this.canSearch()) {
+      return [];
+    }
+    const session = this.getSession();
+    if (!session) {
       return [];
     }
     const { topK, alpha } = getSearchOptions();

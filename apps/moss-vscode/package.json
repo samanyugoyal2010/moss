@@ -42,6 +42,10 @@
         "title": "Moss: Focus Search"
       },
       {
+        "command": "moss.index.create",
+        "title": "Moss: Create Index"
+      },
+      {
         "command": "moss.index.rebuild",
         "title": "Moss: Rebuild Index"
       },

@@ -1,34 +1,52 @@
 import * as vscode from "vscode";
 import { MossSessionManager } from "./moss/client";
 import {
+  clearWorkspaceIndexed,
+  isWorkspaceMarkedIndexed,
+  markWorkspaceIndexed,
   promptAndStoreCredentials,
   resolveCredentials,
+  workspaceSessionName,
 } from "./moss/config";
 import { CodebaseIndexer } from "./indexer/indexer";
 import { SemanticSearch, type SearchHit } from "./search/search";
 import { MossSearchViewProvider } from "./ui/sidebar";
 
 let statusBarItem: vscode.StatusBarItem | undefined;
+let outputChannel: vscode.OutputChannel | undefined;
+
+function log(message: string): void {
+  outputChannel?.appendLine(`[${new Date().toISOString()}] ${message}`);
+}
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  outputChannel = vscode.window.createOutputChannel("Moss Code Search");
+  context.subscriptions.push(outputChannel);
+
   const sessionManager = new MossSessionManager();
   const indexer = new CodebaseIndexer();
-  const search = new SemanticSearch(() =>
-    sessionManager.isReady ? sessionManager.getSession() : undefined,
+  const search = new SemanticSearch(
+    () => (indexer.canSearch() ? sessionManager.getSession() : undefined),
+    () => indexer.canSearch(),
   );
 
   statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     100,
   );
-  statusBarItem.text = "$(search) Moss: starting…";
+  statusBarItem.text = "$(search) Moss";
   statusBarItem.command = "moss.search.focus";
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
+  const createIndex = async (): Promise<void> => {
+    await runCreateIndex(context, sessionManager, indexer, provider);
+  };
+
   const provider = new MossSearchViewProvider(context.extensionUri, {
     onQuery: async (query) => search.query(query),
     onOpen: async (hit) => openHit(hit),
+    onCreateIndex: createIndex,
   });
 
   context.subscriptions.push(
@@ -41,19 +59,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     indexer.onStatus((status) => {
       provider.setStatus(status);
-      if (!statusBarItem) {
-        return;
-      }
-      if (status.state === "indexing") {
-        statusBarItem.text = `$(sync~spin) Moss: indexing ${status.processed}/${status.total}`;
-      } else if (status.state === "ready") {
-        statusBarItem.text = `$(check) Moss: ${status.files} files`;
-      } else if (status.state === "error") {
-        statusBarItem.text = "$(error) Moss: error";
-        statusBarItem.tooltip = status.message;
-      } else {
-        statusBarItem.text = "$(search) Moss";
-      }
+      updateStatusBar(status);
     }),
   );
 
@@ -67,27 +73,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("moss.credentials.configure", async () => {
       const creds = await promptAndStoreCredentials(context);
       if (creds) {
-        await bootstrap(context, sessionManager, indexer, provider);
+        provider.setStatus({ state: "unindexed" });
+        vscode.window.showInformationMessage(
+          "Moss credentials saved. Click Create Index in the sidebar to index this workspace.",
+        );
       }
     }),
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand("moss.index.create", createIndex),
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand("moss.index.rebuild", async () => {
-      if (!sessionManager.isReady) {
-        vscode.window.showWarningMessage("Moss is not ready yet.");
-        return;
-      }
-      await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: "Moss: rebuilding index…",
-          cancellable: true,
-        },
-        async (_progress, token) => {
-          await indexer.rebuild(token);
-        },
-      );
+      await runCreateIndex(context, sessionManager, indexer, provider, true);
     }),
   );
 
@@ -98,7 +98,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   });
 
+  process.on("unhandledRejection", (reason) => {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    log(`Unhandled rejection: ${message}`);
+    vscode.window.showErrorMessage(`Moss error: ${message}`);
+  });
+
   await bootstrap(context, sessionManager, indexer, provider);
+}
+
+function updateStatusBar(status: import("./indexer/indexer").IndexStatus): void {
+  if (!statusBarItem) {
+    return;
+  }
+  if (status.state === "indexing") {
+    statusBarItem.text = `$(sync~spin) Moss: indexing ${status.processed}/${status.total}`;
+    statusBarItem.tooltip = undefined;
+  } else if (status.state === "ready") {
+    statusBarItem.text = `$(check) Moss: ${status.files} files`;
+    statusBarItem.tooltip = undefined;
+  } else if (status.state === "error") {
+    statusBarItem.text = "$(error) Moss: error";
+    statusBarItem.tooltip = status.message;
+  } else if (status.state === "unindexed") {
+    statusBarItem.text = "$(database) Moss: not indexed";
+    statusBarItem.tooltip = "Click Create Index in the Moss Search sidebar";
+  }
 }
 
 async function bootstrap(
@@ -107,21 +132,11 @@ async function bootstrap(
   indexer: CodebaseIndexer,
   provider: MossSearchViewProvider,
 ): Promise<void> {
-  let credentials = await resolveCredentials(context);
-  if (!credentials) {
-    const choice = await vscode.window.showInformationMessage(
-      "Moss Code Search needs project credentials to index your workspace.",
-      "Configure",
-    );
-    if (choice === "Configure") {
-      credentials = await promptAndStoreCredentials(context);
-    }
-  }
-
+  const credentials = await resolveCredentials(context);
   if (!credentials) {
     provider.setStatus({
       state: "error",
-      message: "Missing Moss credentials. Run “Moss: Configure Credentials”.",
+      message: "Missing credentials. Run “Moss: Configure Credentials”.",
     });
     if (statusBarItem) {
       statusBarItem.text = "$(warning) Moss: credentials needed";
@@ -129,28 +144,112 @@ async function bootstrap(
     return;
   }
 
+  if (!isWorkspaceMarkedIndexed(context)) {
+    provider.setStatus({ state: "unindexed" });
+    log(`Workspace ${workspaceSessionName()} has no index — waiting for Create Index`);
+    return;
+  }
+
   try {
     if (statusBarItem) {
-      statusBarItem.text = "$(sync~spin) Moss: connecting…";
+      statusBarItem.text = "$(sync~spin) Moss: loading index…";
     }
     const session = await sessionManager.initialize(credentials);
     indexer.attachSession(session);
     indexer.startWatching(context.subscriptions);
 
+    const docCount = session.docCount ?? 0;
+    if (docCount > 0) {
+      indexer.markReadyFromSession(docCount, docCount);
+      log(`Resumed existing index with ${docCount} chunks`);
+      return;
+    }
+
+    await clearWorkspaceIndexed(context);
+    provider.setStatus({ state: "unindexed" });
+    log("Marked index missing in session — Create Index required");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`Bootstrap failed: ${message}`);
+    await clearWorkspaceIndexed(context);
+    provider.setStatus({ state: "unindexed" });
+    vscode.window.showWarningMessage(
+      `Moss could not load a previous index. Click Create Index to try again. (${message})`,
+    );
+  }
+}
+
+async function runCreateIndex(
+  context: vscode.ExtensionContext,
+  sessionManager: MossSessionManager,
+  indexer: CodebaseIndexer,
+  provider: MossSearchViewProvider,
+  rebuild = false,
+): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders?.length) {
+    vscode.window.showWarningMessage("Open a folder before creating an index.");
+    return;
+  }
+
+  let credentials = await resolveCredentials(context);
+  if (!credentials) {
+    const choice = await vscode.window.showInformationMessage(
+      "Moss needs project credentials before indexing.",
+      "Configure",
+    );
+    if (choice === "Configure") {
+      credentials = await promptAndStoreCredentials(context);
+    }
+  }
+  if (!credentials) {
+    provider.setStatus({
+      state: "error",
+      message: "Missing credentials. Run “Moss: Configure Credentials”.",
+    });
+    return;
+  }
+
+  if (indexer.getStatus().state === "indexing") {
+    vscode.window.showInformationMessage("Moss is already indexing this workspace.");
+    return;
+  }
+
+  try {
+    if (!sessionManager.isReady) {
+      if (statusBarItem) {
+        statusBarItem.text = "$(sync~spin) Moss: connecting…";
+      }
+      const session = await sessionManager.initialize(credentials);
+      indexer.attachSession(session);
+      indexer.startWatching(context.subscriptions);
+    }
+
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: "Moss: indexing workspace…",
+        title: rebuild ? "Moss: rebuilding index…" : "Moss: creating index…",
         cancellable: true,
       },
       async (_progress, token) => {
         await indexer.rebuild(token);
       },
     );
+
+    if (indexer.isIndexed()) {
+      await markWorkspaceIndexed(context);
+      const status = indexer.getStatus();
+      const files = status.state === "ready" ? status.files : 0;
+      log(`Index created for ${workspaceSessionName()}`);
+      vscode.window.showInformationMessage(
+        `Moss index ready — ${files} files indexed.`,
+      );
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    log(`Create index failed: ${message}`);
     provider.setStatus({ state: "error", message });
-    vscode.window.showErrorMessage(`Moss failed to start: ${message}`);
+    vscode.window.showErrorMessage(`Moss indexing failed: ${message}`);
     if (statusBarItem) {
       statusBarItem.text = "$(error) Moss: error";
       statusBarItem.tooltip = message;

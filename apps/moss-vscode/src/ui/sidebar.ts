@@ -5,13 +5,14 @@ import type { SearchHit } from "../search/search";
 export type SidebarCallbacks = {
   onQuery: (query: string) => Promise<SearchHit[]>;
   onOpen: (hit: SearchHit) => Promise<void>;
+  onCreateIndex: () => Promise<void>;
 };
 
 export class MossSearchViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "moss.searchView";
 
   private view?: vscode.WebviewView;
-  private status: IndexStatus = { state: "idle" };
+  private status: IndexStatus = { state: "unindexed" };
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -35,17 +36,24 @@ export class MossSearchViewProvider implements vscode.WebviewViewProvider {
       if (!message || typeof message !== "object") {
         return;
       }
-      if (message.type === "query" && typeof message.text === "string") {
-        try {
+      try {
+        if (message.type === "query" && typeof message.text === "string") {
+          if (this.status.state !== "ready") {
+            this.postResults([]);
+            return;
+          }
           const hits = await this.callbacks.onQuery(message.text);
           this.postResults(hits);
-        } catch (err) {
-          const error = err instanceof Error ? err.message : String(err);
-          this.postError(error);
         }
-      }
-      if (message.type === "open" && message.hit) {
-        await this.callbacks.onOpen(message.hit as SearchHit);
+        if (message.type === "createIndex") {
+          await this.callbacks.onCreateIndex();
+        }
+        if (message.type === "open" && message.hit) {
+          await this.callbacks.onOpen(message.hit as SearchHit);
+        }
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        this.postError(error);
       }
     });
   }
@@ -84,10 +92,14 @@ export class MossSearchViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="container">
-    <div class="search-row">
-      <input id="query" type="search" placeholder="Semantic search…" autocomplete="off" />
+    <div id="index-panel" class="index-panel">
+      <p class="index-hint">Index this workspace to enable semantic search.</p>
+      <button id="create-index" type="button" class="primary-btn">Create Index</button>
     </div>
-    <div id="status">Starting…</div>
+    <div class="search-row">
+      <input id="query" type="search" placeholder="Semantic search…" autocomplete="off" disabled />
+    </div>
+    <div id="status">Not indexed</div>
     <ul id="results"></ul>
   </div>
   <script nonce="${nonce}">
@@ -95,10 +107,12 @@ export class MossSearchViewProvider implements vscode.WebviewViewProvider {
     const input = document.getElementById('query');
     const statusEl = document.getElementById('status');
     const resultsEl = document.getElementById('results');
+    const indexPanel = document.getElementById('index-panel');
+    const createBtn = document.getElementById('create-index');
     let timer;
 
     function formatStatus(status) {
-      if (!status) return '';
+      if (!status) return 'Not indexed';
       if (status.state === 'indexing') {
         return 'Indexing ' + status.processed + '/' + status.total + '…';
       }
@@ -108,11 +122,34 @@ export class MossSearchViewProvider implements vscode.WebviewViewProvider {
       if (status.state === 'error') {
         return 'Error: ' + status.message;
       }
-      return 'Idle';
+      if (status.state === 'unindexed') {
+        return 'Not indexed — click Create Index';
+      }
+      return 'Not indexed';
+    }
+
+    function applyStatus(status) {
+      const ready = status && status.state === 'ready';
+      const indexing = status && status.state === 'indexing';
+      input.disabled = !ready;
+      indexPanel.style.display = ready || indexing ? 'none' : 'block';
+      createBtn.disabled = indexing;
+      createBtn.textContent = indexing ? 'Indexing…' : 'Create Index';
+      statusEl.textContent = formatStatus(status);
+      if (!ready && !input.value.trim()) {
+        renderHits([]);
+      }
     }
 
     function renderHits(hits) {
       resultsEl.innerHTML = '';
+      if (input.disabled) {
+        const empty = document.createElement('li');
+        empty.className = 'empty';
+        empty.textContent = 'Create an index first, then search your codebase.';
+        resultsEl.appendChild(empty);
+        return;
+      }
       if (!hits || !hits.length) {
         const empty = document.createElement('li');
         empty.className = 'empty';
@@ -148,7 +185,12 @@ export class MossSearchViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    createBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'createIndex' });
+    });
+
     input.addEventListener('input', () => {
+      if (input.disabled) return;
       clearTimeout(timer);
       timer = setTimeout(() => {
         vscode.postMessage({ type: 'query', text: input.value });
@@ -159,7 +201,7 @@ export class MossSearchViewProvider implements vscode.WebviewViewProvider {
       const msg = event.data;
       if (!msg) return;
       if (msg.type === 'status') {
-        statusEl.textContent = formatStatus(msg.status);
+        applyStatus(msg.status);
       }
       if (msg.type === 'results') {
         renderHits(msg.hits || []);
@@ -169,6 +211,7 @@ export class MossSearchViewProvider implements vscode.WebviewViewProvider {
       }
     });
 
+    applyStatus({ state: 'unindexed' });
     renderHits([]);
   </script>
 </body>

@@ -86,6 +86,28 @@ export function workspaceSessionName(): string {
   return `vscode-${hash}`;
 }
 
+export function indexedStateKey(): string {
+  return `moss.indexed.${workspaceSessionName()}`;
+}
+
+export async function markWorkspaceIndexed(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  await context.workspaceState.update(indexedStateKey(), true);
+}
+
+export function isWorkspaceMarkedIndexed(
+  context: vscode.ExtensionContext,
+): boolean {
+  return context.workspaceState.get(indexedStateKey(), false);
+}
+
+export async function clearWorkspaceIndexed(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  await context.workspaceState.update(indexedStateKey(), undefined);
+}
+
 export function getSearchOptions(): { topK: number; alpha: number } {
   const config = vscode.workspace.getConfiguration("moss");
   return {

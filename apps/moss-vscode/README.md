@@ -4,8 +4,8 @@ Semantic search over your open workspace, powered by [Moss](https://moss.dev) â€
 
 ## Features
 
-- Indexes workspace source files on activation
-- Sidebar with live (debounced) semantic search
+- **Manual indexing** â€” click **Create Index** in the sidebar (no auto-index on open)
+- Sidebar with live (debounced) semantic search after indexing
 - Click a result to jump to file + line
 - Incremental re-index on save / create / delete / rename
 - Credentials via `.env`, VS Code settings, or Secret Storage
@@ -32,6 +32,7 @@ Or from the Command Palette after installing a `.vsix`:
 | Command | Description |
 |---------|-------------|
 | `Moss: Focus Search` | Focus the semantic search sidebar |
+| `Moss: Create Index` | Index the open workspace (required before search) |
 | `Moss: Rebuild Index` | Re-scan and re-index the workspace |
 | `Moss: Configure Credentials` | Store project ID / key in Secret Storage |
 

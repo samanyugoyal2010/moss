@@ -3,10 +3,11 @@ import * as vscode from "vscode";
 import { chunkFile } from "./chunker";
 import { readFileForIndex, scanWorkspaceFiles, toWorkspaceRelative } from "./scanner";
 
-const BATCH_SIZE = 64;
+const BATCH_SIZE = 32;
+const YIELD_EVERY_FILES = 25;
 
 export type IndexStatus =
-  | { state: "idle" }
+  | { state: "unindexed" }
   | { state: "indexing"; processed: number; total: number }
   | { state: "ready"; files: number; chunks: number }
   | { state: "error"; message: string };
@@ -15,11 +16,12 @@ export type StatusListener = (status: IndexStatus) => void;
 
 export class CodebaseIndexer {
   private session: SessionIndex | undefined;
-  private status: IndexStatus = { state: "idle" };
+  private status: IndexStatus = { state: "unindexed" };
   private listeners = new Set<StatusListener>();
   private pathChunkCounts = new Map<string, number>();
   private watchers: vscode.Disposable[] = [];
   private indexing = false;
+  private watchingEnabled = false;
 
   onStatus(listener: StatusListener): vscode.Disposable {
     this.listeners.add(listener);
@@ -29,6 +31,14 @@ export class CodebaseIndexer {
 
   getStatus(): IndexStatus {
     return this.status;
+  }
+
+  isIndexed(): boolean {
+    return this.status.state === "ready" && this.pathChunkCounts.size > 0;
+  }
+
+  canSearch(): boolean {
+    return this.isIndexed() && !this.indexing;
   }
 
   private setStatus(status: IndexStatus): void {
@@ -85,6 +95,9 @@ export class CodebaseIndexer {
         }
         const file = await readFileForIndex(uri);
         processed += 1;
+        if (processed % YIELD_EVERY_FILES === 0) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
         this.setStatus({
           state: "indexing",
           processed,
@@ -106,6 +119,14 @@ export class CodebaseIndexer {
       }
 
       await flush();
+      if (this.pathChunkCounts.size === 0) {
+        this.setStatus({
+          state: "error",
+          message: "No indexable files found in this workspace.",
+        });
+        return;
+      }
+      this.watchingEnabled = true;
       this.setStatus({
         state: "ready",
         files: this.pathChunkCounts.size,
@@ -120,8 +141,17 @@ export class CodebaseIndexer {
     }
   }
 
+  markReadyFromSession(fileCount: number, chunkCount: number): void {
+    if (fileCount > 0 && chunkCount > 0) {
+      this.watchingEnabled = true;
+      this.setStatus({ state: "ready", files: fileCount, chunks: chunkCount });
+    } else {
+      this.setStatus({ state: "unindexed" });
+    }
+  }
+
   async upsertFile(uri: vscode.Uri): Promise<void> {
-    if (!this.session) {
+    if (!this.session || !this.watchingEnabled || this.indexing) {
       return;
     }
     const file = await readFileForIndex(uri);
@@ -155,7 +185,7 @@ export class CodebaseIndexer {
   }
 
   async removeFile(uri: vscode.Uri): Promise<void> {
-    if (!this.session) {
+    if (!this.session || !this.watchingEnabled || this.indexing) {
       return;
     }
     const relativePath = toWorkspaceRelative(uri);
@@ -233,6 +263,7 @@ export class CodebaseIndexer {
     this.listeners.clear();
     this.pathChunkCounts.clear();
     this.session = undefined;
+    this.watchingEnabled = false;
   }
 
   private refreshReadyStatus(): void {
