@@ -77,6 +77,8 @@ class TravelConciergeAgent(Agent):
         self.session_index = session_index
         self.room = room
         self.turn = 0
+        # background task that stores the current turn's facts; awaited next turn
+        self._pending_remember = None
         # Small, fast model used only to distill the traveler's speech into facts.
         self._extractor = AsyncOpenAI()
 
@@ -99,6 +101,12 @@ class TravelConciergeAgent(Agent):
         query = new_message.text_content
         logger.info(f"Traveler: {query}")
         try:
+            # 0. Make sure the previous turn's facts are stored before we recall,
+            #    so an immediate follow-up question sees them.
+            if self._pending_remember is not None:
+                await self._pending_remember
+                self._pending_remember = None
+
             # 1. Recall prior turns from the live session (short-term memory).
             t = time.perf_counter()
             session_results = await self.session_index.query(query, QueryOptions(top_k=3))
@@ -122,8 +130,9 @@ class TravelConciergeAgent(Agent):
                 turn_ctx.add_message(role="system", content="\n\n".join(blocks) + "\n\nUse this to help the traveler.")
 
             # 5. Distill this turn into facts and store only those in the live session, in the
-            #    background so it never delays the reply. Questions/recall add nothing.
-            asyncio.create_task(self._remember_facts(query))
+            #    background so it never delays the reply. Awaited at the top of the next turn
+            #    (step 0) so recall always sees it. Questions/recall add nothing.
+            self._pending_remember = asyncio.create_task(self._remember_facts(query))
         except Exception as e:
             logger.error(f"Moss lookup failed: {e}", exc_info=True)
 

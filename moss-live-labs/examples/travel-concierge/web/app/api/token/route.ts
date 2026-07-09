@@ -14,8 +14,9 @@ export async function GET() {
     if (!API_KEY) throw new Error("LIVEKIT_API_KEY is not defined");
     if (!API_SECRET) throw new Error("LIVEKIT_API_SECRET is not defined");
 
-    const roomName = `support-demo-${Math.floor(Math.random() * 100_000)}`;
-    const identity = `user-${Math.floor(Math.random() * 100_000)}`;
+    // collision-resistant so concurrent visitors never share a room (and its audio / moss.retrieval data)
+    const roomName = `travel-demo-${crypto.randomUUID()}`;
+    const identity = `user-${crypto.randomUUID()}`;
 
     const at = new AccessToken(API_KEY, API_SECRET, { identity, name: "You", ttl: "15m" });
     const grant: VideoGrant = {
