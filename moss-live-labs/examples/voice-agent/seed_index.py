@@ -28,6 +28,11 @@ FAQS_PATH = Path(__file__).parent / "data" / "faqs.json"
 
 
 async def main() -> None:
+    if not MOSS_PROJECT_ID or not MOSS_PROJECT_KEY:
+        raise SystemExit(
+            "Missing MOSS_PROJECT_ID / MOSS_PROJECT_KEY. Copy .env.example to .env and fill them in."
+        )
+
     faqs = json.loads(FAQS_PATH.read_text())
     docs = [
         DocumentInfo(

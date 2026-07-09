@@ -61,6 +61,8 @@ export function RetrievalPanel() {
           {REGIONS.map((r) => (
             <button
               key={r}
+              type="button"
+              aria-pressed={region === r}
               onClick={() => setRegion(r)}
               style={{
                 padding: "6px 18px",

@@ -28,7 +28,10 @@ MOSS_PROJECT_KEY = os.getenv("MOSS_PROJECT_KEY")
 INDEX_NAME = os.getenv("MOSS_INDEX_NAME", "demo-customer_faqs")
 # This support line serves one region. Metadata filtering scopes retrieval to
 # region-specific policies + global ("all") docs. Set MOSS_REGION=EU to compare.
+ALLOWED_REGIONS = {"US", "EU"}
 REGION = os.getenv("MOSS_REGION", "US")
+if REGION not in ALLOWED_REGIONS:
+    REGION = "US"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("moss-agent")
@@ -135,7 +138,7 @@ async def entrypoint(ctx: JobContext):
         logger.info(f"Successfully loaded index: {INDEX_NAME}")
     except Exception as e:
         logger.warning(f"Index not found or failed to load: {e}")
-        logger.warning("Moss queries will fail until the index is created. Run upload.py first.")
+        logger.warning("Moss queries will fail until the index is created. Run seed_index.py first.")
 
     # Create Session
     session = AgentSession(
@@ -163,9 +166,11 @@ async def entrypoint(ctx: JobContext):
         if pkt.topic == "moss.region":
             try:
                 r = json.loads(bytes(pkt.data).decode("utf-8")).get("region")
-                if r:
+                if r in ALLOWED_REGIONS:
                     agent.region = r
                     logger.info(f"Region filter set to {r}")
+                else:
+                    logger.warning(f"Ignoring unknown region {r!r} (allowed: {sorted(ALLOWED_REGIONS)})")
             except Exception as e:
                 logger.warning(f"Bad region packet: {e}")
 

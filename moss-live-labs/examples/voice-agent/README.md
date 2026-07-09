@@ -13,8 +13,8 @@ Browser (web/)  ⟷  LiveKit room  ⟷  agent.py (STT → LLM → TTS)  ⟷  Mos
 
 - A [Moss](https://moss.dev) account (project ID + key)
 - [LiveKit](https://livekit.io) running locally (`livekit-server --dev`)
-- [OpenAI](https://platform.openai.com) (LLM + text-to-speech) and
-  [Deepgram](https://deepgram.com) (speech-to-text) API keys
+- [OpenAI](https://platform.openai.com) (LLM), [Deepgram](https://deepgram.com)
+  (speech-to-text), and [Cartesia](https://cartesia.ai) (text-to-speech) API keys
 - Python 3.14+ (`uv`) and Node 18+ (`npm`) for the web UI
 
 ## Setup
@@ -25,7 +25,7 @@ cp .env.example .env          # fill in your Moss + provider keys
 python agent.py download-files
 ```
 
-`.env` keys: `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`.
+`.env` keys: `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`.
 For local LiveKit, leave the `LIVEKIT_*` values as-is; for LiveKit Cloud, set them to your
 project's URL/key/secret and copy the same three into `web/.env.local`. The index name
 defaults to `demo-customer_faqs` (override with `MOSS_INDEX_NAME`).
@@ -67,7 +67,7 @@ On each user turn, `agent.py` queries Moss and publishes the results to the Live
 on the `moss.retrieval` data channel (`{query, docs:[{text, score}], took_ms}`). The web
 UI listens on that channel and renders them. The voice pipeline is otherwise untouched.
 
-See [`DEMO_SCRIPT.md`](./DEMO_SCRIPT.md) for a ready-to-record walkthrough.
+See [`DEMO_SCRIPT_METADATA.md`](./DEMO_SCRIPT_METADATA.md) for a ready-to-record walkthrough.
 
 ## Resources
 
