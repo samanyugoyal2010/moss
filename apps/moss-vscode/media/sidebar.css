@@ -1,0 +1,110 @@
+:root {
+  color-scheme: light dark;
+  --moss-gap: 8px;
+  --moss-radius: 4px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: transparent;
+}
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--moss-gap);
+  padding: 12px;
+  height: 100vh;
+}
+
+.search-row {
+  display: flex;
+  gap: 6px;
+}
+
+#query {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: var(--moss-radius);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  outline: none;
+}
+
+#query:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+#status {
+  font-size: 11px;
+  opacity: 0.8;
+  min-height: 1.2em;
+}
+
+#results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1;
+}
+
+.result {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px;
+  margin-bottom: 6px;
+  border: none;
+  border-radius: var(--moss-radius);
+  background: var(--vscode-list-inactiveSelectionBackground, transparent);
+  color: inherit;
+  cursor: pointer;
+}
+
+.result:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.result-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.path {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.score {
+  flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.preview {
+  opacity: 0.85;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.35;
+}
+
+.empty {
+  opacity: 0.7;
+  padding: 8px 0;
+}
