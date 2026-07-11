@@ -71,9 +71,64 @@ export async function promptAndStoreCredentials(
     return undefined;
   }
 
-  await context.secrets.store(SECRET_PROJECT_ID, projectId.trim());
-  await context.secrets.store(SECRET_PROJECT_KEY, projectKey.trim());
-  return { projectId: projectId.trim(), projectKey: projectKey.trim() };
+  return storeCredentials(context, projectId.trim(), projectKey.trim());
+}
+
+export async function storeCredentials(
+  context: vscode.ExtensionContext,
+  projectId: string,
+  projectKey?: string,
+): Promise<MossCredentials | undefined> {
+  const id = projectId.trim();
+  if (!id) {
+    return undefined;
+  }
+
+  const keyInput = projectKey?.trim();
+  let key = keyInput;
+  if (!key) {
+    const existing = await resolveCredentials(context);
+    if (existing?.projectId === id) {
+      key = existing.projectKey;
+    }
+  }
+  if (!key) {
+    return undefined;
+  }
+
+  await context.secrets.store(SECRET_PROJECT_ID, id);
+  if (keyInput) {
+    await context.secrets.store(SECRET_PROJECT_KEY, keyInput);
+  }
+  return { projectId: id, projectKey: key };
+}
+
+export interface MossSettingsSnapshot {
+  projectId: string;
+  hasProjectKey: boolean;
+  credentialsConfigured: boolean;
+  cloudSync: boolean;
+}
+
+export async function getSettingsSnapshot(
+  context: vscode.ExtensionContext,
+): Promise<MossSettingsSnapshot> {
+  const credentials = await resolveCredentials(context);
+  const fromSecretsId = (await context.secrets.get(SECRET_PROJECT_ID)) ?? "";
+  const fromSecretsKey = (await context.secrets.get(SECRET_PROJECT_KEY)) ?? "";
+
+  return {
+    projectId: fromSecretsId || credentials?.projectId || "",
+    hasProjectKey: !!fromSecretsKey || !!credentials?.projectKey,
+    credentialsConfigured: !!credentials,
+    cloudSync: isCloudSyncEnabled(),
+  };
+}
+
+export async function setCloudSyncEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration("moss")
+    .update("cloudSync", enabled, vscode.ConfigurationTarget.Global);
 }
 
 export function workspaceSessionName(): string {
@@ -116,6 +171,10 @@ export function getSearchOptions(): { topK: number; alpha: number } {
   };
 }
 
+export function isCloudSyncEnabled(): boolean {
+  return vscode.workspace.getConfiguration("moss").get<boolean>("cloudSync", true);
+}
+
 export function getIncludeGlobs(): string[] {
   return vscode.workspace
     .getConfiguration("moss")
@@ -132,11 +191,23 @@ export function getExcludeGlobs(): string[] {
       "**/.git/**",
       "**/dist/**",
       "**/build/**",
+      "**/out/**",
       "**/.next/**",
       "**/coverage/**",
       "**/.venv/**",
       "**/venv/**",
       "**/target/**",
       "**/__pycache__/**",
+      "**/vendor/**",
+      "**/bower_components/**",
+      "**/.pnpm/**",
+      "**/.turbo/**",
+      "**/.cache/**",
+      "**/.parcel-cache/**",
+      "**/Pods/**",
+      "**/.gradle/**",
+      "**/site-packages/**",
+      "**/.pytest_cache/**",
+      "**/.mypy_cache/**",
     ]);
 }

@@ -34,8 +34,138 @@ body {
 .brand-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
   padding-bottom: 4px;
+}
+
+.brand-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--moss-radius);
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.72;
+}
+
+.icon-btn:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+  border-color: var(--moss-border);
+}
+
+.icon-btn.active {
+  opacity: 1;
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+  border-color: var(--moss-border);
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.gear-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-panel {
+  padding: 12px;
+  border: 1px solid var(--moss-border);
+  border-radius: var(--moss-radius);
+  background: var(--vscode-editor-background);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-header {
+  margin-bottom: 2px;
+}
+
+.settings-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.field-label {
+  font-size: 11px;
+  opacity: 0.85;
+  margin-top: 4px;
+}
+
+.field-input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: var(--moss-radius);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
+.field-input:focus {
+  border-color: var(--vscode-focusBorder);
+  outline: none;
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder);
+}
+
+.field-hint {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.35;
+  opacity: 0.72;
+}
+
+.field-link {
+  color: var(--vscode-textLink-foreground);
+  text-decoration: none;
+}
+
+.field-link:hover {
+  text-decoration: underline;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.toggle-row input {
+  margin: 0;
+}
+
+.settings-save {
+  margin-top: 6px;
+}
+
+.settings-status {
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+.settings-status.error {
+  color: var(--vscode-errorForeground);
 }
 
 .brand-wordmark {
@@ -108,6 +238,37 @@ body.vscode-high-contrast .brand-wordmark-dark {
 }
 
 .primary-btn:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.actions-row {
+  display: flex;
+  gap: 6px;
+}
+
+.secondary-btn {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--moss-border);
+  border-radius: var(--moss-radius);
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, inherit);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.secondary-btn:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.secondary-btn:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder, #141915);
+  outline-offset: 2px;
+}
+
+.secondary-btn:disabled {
   opacity: 0.65;
   cursor: default;
 }

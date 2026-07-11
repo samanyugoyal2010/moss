@@ -2,9 +2,13 @@ import * as vscode from "vscode";
 import { MossSessionManager } from "./moss/client";
 import {
   clearWorkspaceIndexed,
+  getSettingsSnapshot,
+  isCloudSyncEnabled,
   markWorkspaceIndexed,
   promptAndStoreCredentials,
   resolveCredentials,
+  setCloudSyncEnabled,
+  storeCredentials,
   workspaceSessionName,
 } from "./moss/config";
 import {
@@ -12,6 +16,7 @@ import {
   ensureIndexCacheDir,
   indexCacheDir,
   indexCacheExists,
+  pathChunkCountsFromDocs,
   readIndexMeta,
   workspaceRootPath,
   writeIndexMeta,
@@ -93,10 +98,39 @@ async function activateExtension(context: vscode.ExtensionContext): Promise<void
     await runCreateIndex(context, sessionManager, indexer, provider);
   };
 
-  const provider = new MossSearchViewProvider(context.extensionUri, {
+  let provider: MossSearchViewProvider;
+  provider = new MossSearchViewProvider(context.extensionUri, {
     onQuery: async (query) => search.query(query),
     onOpen: async (hit) => openHit(hit),
     onCreateIndex: createIndex,
+    onSyncCloud: async () => syncIndexToCloud(context, sessionManager, indexer, provider),
+    onGetSettings: async () => getSettingsSnapshot(context),
+    onSaveSettings: async (settings) => {
+      await setCloudSyncEnabled(settings.cloudSync);
+      const projectId = settings.projectId.trim();
+      const projectKey = settings.projectKey?.trim();
+      if (projectId) {
+        const creds = await storeCredentials(context, projectId, projectKey);
+        if (!creds) {
+          return {
+            ok: false,
+            message: "Enter a project key, or save a key first.",
+          };
+        }
+      } else if (projectKey) {
+        return { ok: false, message: "Enter a project ID with the project key." };
+      }
+      const hasCreds = !!(await resolveCredentials(context));
+      if (!hasCreds && !indexCacheExists(context)) {
+        provider.setStatus({
+          state: "error",
+          message: "Missing credentials. Add your Moss project ID and key.",
+        });
+      } else if (!indexer.isIndexed() && !indexCacheExists(context)) {
+        provider.setStatus({ state: "unindexed" });
+      }
+      return { ok: true, message: "Settings saved." };
+    },
   });
 
   context.subscriptions.push(
@@ -121,6 +155,8 @@ async function activateExtension(context: vscode.ExtensionContext): Promise<void
 
   context.subscriptions.push(
     vscode.commands.registerCommand("moss.credentials.configure", async () => {
+      await vscode.commands.executeCommand("moss.searchView.focus");
+      provider.openSettings();
       const creds = await promptAndStoreCredentials(context);
       if (creds) {
         if (!indexCacheExists(context)) {
@@ -140,6 +176,12 @@ async function activateExtension(context: vscode.ExtensionContext): Promise<void
   context.subscriptions.push(
     vscode.commands.registerCommand("moss.index.rebuild", async () => {
       await runCreateIndex(context, sessionManager, indexer, provider, true);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("moss.index.syncCloud", async () => {
+      await syncIndexToCloud(context, sessionManager, indexer, provider);
     }),
   );
 
@@ -179,6 +221,7 @@ async function persistIndex(
   context: vscode.ExtensionContext,
   sessionManager: MossSessionManager,
   indexer: CodebaseIndexer,
+  options: { skipCloudPush?: boolean } = {},
 ): Promise<void> {
   if (!sessionManager.isReady || !indexer.isIndexed()) {
     return;
@@ -189,16 +232,92 @@ async function persistIndex(
   const status = indexer.getStatus();
   const files = status.state === "ready" ? status.files : 0;
   const chunks = status.state === "ready" ? status.chunks : 0;
-  await writeIndexMeta(context, {
+  const existingMeta = await readIndexMeta(context);
+  const meta = {
     workspaceRoot: workspaceRootPath(),
     sessionName: workspaceSessionName(),
     files,
     chunks,
     pathChunkCounts: indexer.getPathChunkCounts(),
     savedAt: new Date().toISOString(),
-  });
+    cloudPushedAt: existingMeta?.cloudPushedAt,
+  };
+  await writeIndexMeta(context, meta);
   await markWorkspaceIndexed(context);
   log(`Persisted index to ${cacheDir} (${files} files, ${chunks} chunks)`);
+
+  if (!options.skipCloudPush && isCloudSyncEnabled()) {
+    await pushIndexToCloud(context, sessionManager, indexer, meta);
+  }
+}
+
+async function pushIndexToCloud(
+  context: vscode.ExtensionContext,
+  sessionManager: MossSessionManager,
+  indexer: CodebaseIndexer,
+  meta?: Awaited<ReturnType<typeof readIndexMeta>>,
+  provider?: MossSearchViewProvider,
+): Promise<boolean> {
+  if (!sessionManager.isReady || !indexer.isIndexed()) {
+    return false;
+  }
+  const sessionName = workspaceSessionName();
+  provider?.setCloudSyncState("syncing");
+  if (statusBarItem) {
+    statusBarItem.text = "$(cloud-upload) Moss: syncing to cloud…";
+  }
+  try {
+    const pushed = await sessionManager.getSession().pushIndex();
+    const currentMeta = meta ?? (await readIndexMeta(context));
+    if (currentMeta) {
+      await writeIndexMeta(context, {
+        ...currentMeta,
+        cloudPushedAt: new Date().toISOString(),
+      });
+    }
+    log(
+      `Pushed index "${sessionName}" to Moss Cloud — ${pushed.docCount} docs (job ${pushed.jobId})`,
+    );
+    provider?.setCloudSyncState("success");
+    updateStatusBar(indexer.getStatus());
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`Cloud push failed: ${message}`);
+    provider?.setCloudSyncState("error", `Cloud sync failed: ${message}`);
+    vscode.window.showWarningMessage(
+      `Moss could not sync the index to the cloud. Local search still works. (${message})`,
+    );
+    updateStatusBar(indexer.getStatus());
+    return false;
+  }
+}
+
+async function syncIndexToCloud(
+  context: vscode.ExtensionContext,
+  sessionManager: MossSessionManager,
+  indexer: CodebaseIndexer,
+  provider?: MossSearchViewProvider,
+): Promise<void> {
+  if (!indexer.isIndexed()) {
+    provider?.setCloudSyncState("error", "Create an index before syncing to Moss Cloud.");
+    vscode.window.showInformationMessage("Create an index before syncing to Moss Cloud.");
+    return;
+  }
+  if (!isCloudSyncEnabled()) {
+    provider?.setCloudSyncState(
+      "error",
+      "Cloud sync is disabled. Enable moss.cloudSync in settings.",
+    );
+    vscode.window.showInformationMessage(
+      "Cloud sync is disabled. Enable moss.cloudSync in settings.",
+    );
+    return;
+  }
+  const ok = await pushIndexToCloud(context, sessionManager, indexer, undefined, provider);
+  if (ok) {
+    vscode.window.showInformationMessage("Moss index synced to the cloud.");
+  }
 }
 
 async function bootstrap(
@@ -220,10 +339,64 @@ async function bootstrap(
   }
 
   const meta = await readIndexMeta(context);
-  if (!meta || Object.keys(meta.pathChunkCounts).length === 0) {
+  const hasLocalCache =
+    !!meta && Object.keys(meta.pathChunkCounts).length > 0 && indexCacheExists(context);
+
+  if (!hasLocalCache && !isCloudSyncEnabled()) {
     provider.setStatus({ state: "unindexed" });
     log(`Workspace ${workspaceSessionName()} ready — waiting for Create Index`);
     return;
+  }
+
+  if (!hasLocalCache) {
+    try {
+      if (statusBarItem) {
+        statusBarItem.text = "$(cloud-download) Moss: checking cloud index…";
+      }
+      log(`No local cache — trying Moss Cloud index ${workspaceSessionName()}`);
+      const session = await sessionManager.initialize(credentials);
+      indexer.attachSession(session);
+      let docCount = session.docCount;
+      if (docCount <= 0) {
+        try {
+          docCount = await session.loadIndex(workspaceSessionName());
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          log(`Cloud index not found: ${message}`);
+        }
+      }
+      if (docCount <= 0 && session.docCount <= 0) {
+        sessionManager.dispose();
+        provider.setStatus({ state: "unindexed" });
+        log(`Workspace ${workspaceSessionName()} ready — waiting for Create Index`);
+        return;
+      }
+      const docs = await session.getDocs();
+      const pathChunkCounts = pathChunkCountsFromDocs(docs);
+      if (Object.keys(pathChunkCounts).length === 0) {
+        throw new Error("Cloud index had no file metadata");
+      }
+      indexer.restoreFromMeta(pathChunkCounts);
+      indexer.startWatching(context.subscriptions);
+      await persistIndex(context, sessionManager, indexer, { skipCloudPush: true });
+      await markWorkspaceIndexed(context);
+      const restored = indexer.getStatus();
+      const restoredFiles = restored.state === "ready" ? restored.files : 0;
+      const restoredChunks = restored.state === "ready" ? restored.chunks : 0;
+      log(
+        `Restored index from Moss Cloud for ${workspaceSessionName()} — ${restoredFiles} files, ${restoredChunks} chunks`,
+      );
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`Cloud restore failed: ${message}`);
+      sessionManager.dispose();
+      provider.setStatus({ state: "unindexed" });
+      if (statusBarItem) {
+        statusBarItem.text = "$(database) Moss: not indexed";
+      }
+      return;
+    }
   }
 
   try {
@@ -243,6 +416,9 @@ async function bootstrap(
     log(
       `Restored index for ${workspaceSessionName()} — ${meta.files} files, ${meta.chunks} chunks (loaded=${loaded}, docCount=${session.docCount})`,
     );
+    if (isCloudSyncEnabled() && meta.cloudPushedAt) {
+      log(`Last cloud sync: ${meta.cloudPushedAt}`);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`Restore failed: ${message}`);

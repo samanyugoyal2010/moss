@@ -1,3 +1,4 @@
+import type { DocumentInfo } from "@moss-dev/moss";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -11,6 +12,19 @@ export interface IndexMeta {
   chunks: number;
   pathChunkCounts: Record<string, number>;
   savedAt: string;
+  cloudPushedAt?: string;
+}
+
+export function pathChunkCountsFromDocs(docs: DocumentInfo[]): Record<string, number> {
+  const counts = new Map<string, number>();
+  for (const doc of docs) {
+    const metadata = doc.metadata as Record<string, string> | undefined;
+    const filePath = metadata?.filePath;
+    if (filePath) {
+      counts.set(filePath, (counts.get(filePath) ?? 0) + 1);
+    }
+  }
+  return Object.fromEntries(counts);
 }
 
 export function workspaceRootPath(): string {

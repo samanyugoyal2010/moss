@@ -1,7 +1,15 @@
 import { fork, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { DocumentInfo, MutationOptions, QueryOptions, SearchResult } from "@moss-dev/moss";
+import * as vscode from "vscode";
+import type {
+  DocumentInfo,
+  GetDocumentsOptions,
+  MutationOptions,
+  PushIndexResult,
+  QueryOptions,
+  SearchResult,
+} from "@moss-dev/moss";
 import type { MossCredentials } from "./config";
 import { workspaceSessionName } from "./config";
 
@@ -17,6 +25,9 @@ export interface LocalMossSession {
   ): Promise<{ added: number; updated: number }>;
   deleteDocs(docIds: string[]): Promise<number>;
   query(query: string, options?: QueryOptions): Promise<SearchResult>;
+  getDocs(options?: GetDocumentsOptions): Promise<DocumentInfo[]>;
+  loadIndex(indexName: string): Promise<number>;
+  pushIndex(): Promise<PushIndexResult>;
   saveToDisk(cachePath: string): Promise<void>;
   loadFromDisk(cachePath: string): Promise<number>;
 }
@@ -82,7 +93,7 @@ export class MossSessionManager {
     }
 
     const workerPath = path.join(this.extensionPath, "dist", "mossWorker.js");
-    const execPath = findNodeBinary();
+    const execPath = findNodeBinary(this.log);
     this.log(`Starting Moss worker: ${workerPath}`);
     this.log(`Moss worker execPath: ${execPath}`);
     this.worker = fork(workerPath, [], {
@@ -155,30 +166,62 @@ export class MossSessionManager {
   }
 }
 
-function findNodeBinary(): string {
+function findSystemNode(): string | undefined {
+  try {
+    if (process.platform === "win32") {
+      const result = spawnSync("where", ["node"], { encoding: "utf8", shell: true });
+      const line = result.stdout
+        ?.split(/\r?\n/)
+        .map((entry) => entry.trim())
+        .find(Boolean);
+      return line || undefined;
+    }
+    const result = spawnSync("which", ["node"], { encoding: "utf8" });
+    const line = result.stdout?.trim();
+    return line || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isExecutable(filePath: string): boolean {
+  try {
+    return fs.existsSync(filePath);
+  } catch {
+    return false;
+  }
+}
+
+function findNodeBinary(log: (message: string) => void = () => undefined): string {
+  const fromSetting = vscode.workspace.getConfiguration("moss").get<string>("nodePath")?.trim();
+
   const candidates = [
+    fromSetting,
     process.env.NODE_BINARY,
     process.env.npm_node_execpath,
+    findSystemNode(),
     process.env.npm_execpath?.endsWith("npm-cli.js")
       ? path.join(path.dirname(path.dirname(process.env.npm_execpath)), "bin", "node")
       : undefined,
-    spawnSync("which", ["node"], { encoding: "utf8" }).stdout?.trim(),
+    process.platform === "win32" ? "C:\\Program Files\\nodejs\\node.exe" : undefined,
     "/opt/homebrew/bin/node",
     "/usr/local/bin/node",
     "/usr/bin/node",
+    process.execPath,
   ].filter(Boolean) as string[];
 
   for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) {
-        return candidate;
+    if (isExecutable(candidate)) {
+      if (candidate === process.execPath) {
+        log("Moss worker using VS Code embedded Node (set moss.nodePath for a standalone Node 20+ binary if needed)");
       }
-    } catch {
-      // Try the next candidate.
+      return candidate;
     }
   }
 
-  return process.execPath;
+  throw new Error(
+    "Could not find a Node.js binary for the Moss worker. Install Node 20+ or set moss.nodePath.",
+  );
 }
 
 class WorkerBackedSession implements LocalMossSession {
@@ -213,6 +256,28 @@ class WorkerBackedSession implements LocalMossSession {
 
   async query(query: string, options?: QueryOptions): Promise<SearchResult> {
     return this.call<SearchResult>("query", { query, options });
+  }
+
+  async getDocs(options?: GetDocumentsOptions): Promise<DocumentInfo[]> {
+    const result = await this.call<{ docs: DocumentInfo[]; docCount: number }>("getDocs", {
+      options,
+    });
+    this.count = result.docCount;
+    return result.docs;
+  }
+
+  async loadIndex(indexName: string): Promise<number> {
+    const result = await this.call<{ loaded: number; docCount: number }>("loadIndex", {
+      indexName,
+    });
+    this.count = result.docCount;
+    return result.loaded;
+  }
+
+  async pushIndex(): Promise<PushIndexResult> {
+    const result = await this.call<PushIndexResult & { docCount: number }>("pushIndex", {});
+    this.count = result.docCount;
+    return result;
   }
 
   async saveToDisk(cachePath: string): Promise<void> {

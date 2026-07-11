@@ -2,6 +2,7 @@ import type { DocumentInfo } from "@moss-dev/moss";
 import * as vscode from "vscode";
 import type { LocalMossSession } from "../moss/client";
 import { chunkFile } from "./chunker";
+import { isExcludedFromIndex } from "./excludes";
 import { readFileForIndex, scanWorkspaceFiles, toWorkspaceRelative } from "./scanner";
 
 const BATCH_SIZE = 4;
@@ -188,6 +189,10 @@ export class CodebaseIndexer {
 
   async upsertFile(uri: vscode.Uri): Promise<void> {
     if (!this.session || !this.watchingEnabled || this.indexing) {
+      return;
+    }
+    const relativePath = toWorkspaceRelative(uri);
+    if (isExcludedFromIndex(relativePath)) {
       return;
     }
     const file = await readFileForIndex(uri);

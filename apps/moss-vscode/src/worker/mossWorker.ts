@@ -1,7 +1,9 @@
 import type {
   DocumentInfo,
+  GetDocumentsOptions,
   MossClient,
   MutationOptions,
+  PushIndexResult,
   QueryOptions,
   SearchResult,
   SessionIndex,
@@ -14,6 +16,9 @@ type Request = {
     | "addDocs"
     | "deleteDocs"
     | "query"
+    | "getDocs"
+    | "loadIndex"
+    | "pushIndex"
     | "saveToDisk"
     | "loadFromDisk";
   args: unknown;
@@ -76,6 +81,23 @@ async function handle(method: Request["method"], args: unknown): Promise<unknown
     };
     const result: SearchResult = await requireSession().query(query, options);
     return result;
+  }
+
+  if (method === "getDocs") {
+    const { options } = args as { options?: GetDocumentsOptions };
+    const docs = await requireSession().getDocs(options);
+    return { docs, docCount: requireSession().docCount };
+  }
+
+  if (method === "loadIndex") {
+    const { indexName } = args as { indexName: string };
+    const loaded = await requireSession().loadIndex(indexName);
+    return { loaded, docCount: requireSession().docCount };
+  }
+
+  if (method === "pushIndex") {
+    const result: PushIndexResult = await requireSession().pushIndex();
+    return { ...result, docCount: requireSession().docCount };
   }
 
   if (method === "saveToDisk") {

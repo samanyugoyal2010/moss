@@ -3,6 +3,7 @@ import * as path from "node:path";
 import ignore from "ignore";
 import * as vscode from "vscode";
 import { getExcludeGlobs, getIncludeGlobs } from "../moss/config";
+import { isExcludedFromIndex } from "./excludes";
 
 const MAX_FILE_BYTES = 512 * 1024;
 
@@ -57,6 +58,9 @@ export async function scanWorkspaceFiles(
       const found = await vscode.workspace.findFiles(pattern, exclude, undefined, token);
       for (const uri of found) {
         const rel = path.relative(folder.uri.fsPath, uri.fsPath).split(path.sep).join("/");
+        if (isExcludedFromIndex(rel)) {
+          continue;
+        }
         if (gitignore?.ignores(rel)) {
           continue;
         }
