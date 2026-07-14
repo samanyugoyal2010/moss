@@ -2,16 +2,9 @@
 
 import { PipecatClient } from "@pipecat-ai/client-js";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type SessionState = "idle" | "connecting" | "active";
-
-type LatencyMetrics = {
-  sttMs: number;
-  mossMs: number;
-  llmTtftMs: number;
-  totalMs: number;
-};
 
 type GradeFeedback = {
   topic: string | null;
@@ -36,20 +29,6 @@ const EMPTY_ASSIST: AssistPanelState = {
 };
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
-
-const TARGET_LATENCY: LatencyMetrics = {
-  sttMs: 150,
-  mossMs: 5,
-  llmTtftMs: 200,
-  totalMs: 355,
-};
-
-function formatMs(value: number, digits = 0): string {
-  if (value < 10 && digits === 0) {
-    return value.toFixed(1);
-  }
-  return value.toFixed(digits);
-}
 
 function parseDataPayload(data: unknown): Record<string, unknown> | null {
   try {
@@ -82,7 +61,6 @@ function extractQuestionFromBotText(text: string): string {
 export default function HomePage() {
   const [session, setSession] = useState<SessionState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [latency, setLatency] = useState<LatencyMetrics>(TARGET_LATENCY);
   const [interruptFlash, setInterruptFlash] = useState(false);
   const [interruptCount, setInterruptCount] = useState(0);
   const [aiTalking, setAiTalking] = useState(false);
@@ -149,24 +127,6 @@ export default function HomePage() {
       }));
       return;
     }
-
-    if (msg.type === "latency" || "moss_ms" in msg || "llm_ttft_ms" in msg) {
-      setLatency((prev) => {
-        const sttMs = typeof msg.stt_ms === "number" ? msg.stt_ms : prev.sttMs;
-        const mossMs = typeof msg.moss_ms === "number" ? msg.moss_ms : prev.mossMs;
-        const llmTtftMs =
-          typeof msg.llm_ttft_ms === "number" ? msg.llm_ttft_ms : prev.llmTtftMs;
-        const totalMs =
-          typeof msg.total_ms === "number" ? msg.total_ms : sttMs + mossMs + llmTtftMs;
-        return { sttMs, mossMs, llmTtftMs, totalMs };
-      });
-
-      if (msg.interrupted === true) {
-        setInterruptCount((c) => c + 1);
-        setInterruptFlash(true);
-        window.setTimeout(() => setInterruptFlash(false), 900);
-      }
-    }
   }, []);
 
   const attachBotAudio = useCallback((track: MediaStreamTrack) => {
@@ -209,7 +169,6 @@ export default function HomePage() {
     setError(null);
     setSession("connecting");
     setInterruptCount(0);
-    setLatency(TARGET_LATENCY);
     setLocalLevel(0);
     setRemoteLevel(0);
     setAssist(EMPTY_ASSIST);
@@ -344,7 +303,6 @@ export default function HomePage() {
       {session === "connecting" && <ConnectingView />}
       {session === "active" && (
         <ActiveInterview
-          latency={latency}
           interruptCount={interruptCount}
           interruptFlash={interruptFlash}
           aiTalking={ringAi}
@@ -403,7 +361,6 @@ function ConnectingView() {
 }
 
 function ActiveInterview({
-  latency,
   interruptCount,
   interruptFlash,
   aiTalking,
@@ -412,7 +369,6 @@ function ActiveInterview({
   assist,
   onEnd,
 }: {
-  latency: LatencyMetrics;
   interruptCount: number;
   interruptFlash: boolean;
   aiTalking: boolean;
@@ -475,7 +431,7 @@ function ActiveInterview({
             </div>
           </div>
 
-          <div className="w-full max-w-md space-y-5">
+          <div className="w-full max-w-md">
             <div
               className={`border-y border-[var(--cream)]/10 py-4 ${
                 interruptFlash ? "interrupt-flash" : ""
@@ -505,13 +461,17 @@ function ActiveInterview({
                 Successful interruptions: {interruptCount}
               </p>
             </div>
-
-            <LatencyHud latency={latency} />
           </div>
         </div>
 
         <AssistPanel assist={assist} />
       </div>
+
+      <footer className="mt-auto pt-10 text-center">
+        <p className="text-xs tracking-[0.22em] text-[var(--fog)] uppercase">
+          Powered by <span className="text-[var(--accent)]">Moss</span>
+        </p>
+      </footer>
     </section>
   );
 }
@@ -593,67 +553,12 @@ function AssistPanel({ assist }: { assist: AssistPanelState }) {
 
           {!grading && !feedback && (
             <p className="text-sm text-[var(--fog)]/70">
-              After you answer, a silent Ollama pass scores the turn and lists improvement tips —
-              without interrupting the coach.
+              When the coach decides your answer is ready, it calls a grading tool grounded in the
+              Moss rubric — score and tips land here without interrupting the interview.
             </p>
           )}
         </div>
       </div>
     </aside>
-  );
-}
-
-function LatencyHud({ latency }: { latency: LatencyMetrics }) {
-  const rows = useMemo(
-    () => [
-      {
-        label: "Speech-to-Text",
-        value: `~${formatMs(latency.sttMs)}ms`,
-        highlight: false as const,
-      },
-      {
-        label: "Moss Retrieval",
-        value: `<${formatMs(Math.max(latency.mossMs, 0.1), latency.mossMs < 10 ? 1 : 0)}ms`,
-        highlight: true as const,
-      },
-      {
-        label: "LLM Time-to-First-Token",
-        value: `~${formatMs(latency.llmTtftMs)}ms`,
-        highlight: false as const,
-      },
-      {
-        label: "Total Turn-Around Latency",
-        value: `~${formatMs(latency.totalMs)}ms`,
-        highlight: false as const,
-      },
-    ],
-    [latency],
-  );
-
-  return (
-    <div className="border-y border-[var(--cream)]/10 py-4">
-      <p className="mb-3 text-xs tracking-[0.2em] text-[var(--fog)] uppercase">
-        Real-Time Latency HUD
-      </p>
-      <ul className="space-y-2.5">
-        {rows.map((row) => (
-          <li
-            key={row.label}
-            className={`flex items-center justify-between gap-4 px-1 py-1.5 ${
-              row.highlight ? "text-[var(--accent)]" : ""
-            }`}
-          >
-            <span className="text-sm text-[var(--fog)]">{row.label}</span>
-            <span
-              className={`font-mono text-sm font-semibold tabular-nums ${
-                row.highlight ? "text-[var(--accent)]" : "text-[var(--cream)]"
-              }`}
-            >
-              {row.value}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }

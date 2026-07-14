@@ -80,13 +80,13 @@ Open [http://localhost:3000](http://localhost:3000) → **Start Interview**.
 ```
 Browser (SmallWebRTC)
   ↔ POST /api/offer (SDP)
-  ↔ Pipecat: Silero VAD → Whisper → MossContextInjector → Ollama → Piper
+  ↔ Pipecat: Silero VAD → Whisper → MossContextInjector → Ollama(+tools) → Piper
   ↔ Assist panel events: current_question / user_answer / grade_result
 ```
 
 Moss loads the index into the local runtime once (`load_index`), then each user turn queries in-process (&lt;10 ms) and appends **Context/Rubric Guidelines** to the LLM system prompt — the same ambient-retrieval pattern described in the [Moss Pipecat integration](https://docs.moss.dev/docs/integrations/pipecat) and [offline-first search](https://docs.moss.dev/docs/build/offline-first-search) docs.
 
-During an active session, the **Assist** side panel shows the current coach question, a snippet of your last answer, and a silent second Ollama pass that grades the turn against the Moss rubric (score + improvement tips) without speaking through TTS.
+During an active session, the **Assist** side panel shows the current coach question, your last answer, and real-time grade feedback. When the coach LLM decides a substantive answer was given, it calls the `grade_candidate_answer` tool; that runs a silent Ollama grade against the Moss rubric (score + tips) without speaking through TTS.
 
 ## Key files
 
@@ -96,6 +96,7 @@ During an active session, the **Assist** side panel shows the current coach ques
 
 ## Notes
 
-- Latency HUD and Assist panel read WebRTC data-channel JSON (`type: "latency"` / `"interruption"` / `"current_question"` / `"user_answer"` / `"grade_result"`). Until live metrics arrive, latency placeholders are shown (~150 / &lt;5 / ~200 / ~355 ms); Moss stays highlighted in green.
-- Local Whisper + Piper STT/TTS latency will usually exceed cloud Deepgram/Cartesia; Moss remains the sub-10ms hop.
-- Interruption / barge-in uses Pipecat VAD turn strategies.
+- Assist panel reads WebRTC data-channel JSON (`type: "interruption"` / `"current_question"` / `"user_answer"` / `"grade_result"` / `"grading_started"`). Grading is LLM tool-triggered via `grade_candidate_answer`.
+- Local Whisper + Piper STT/TTS latency will usually exceed cloud Deepgram/Cartesia; Moss remains the sub-10ms retrieval hop.
+- Interruption / barge-in uses Pipecat VAD turn strategies. Active session footer: **Powered by Moss**.
+- If the coach rarely invokes tools, try a tool-capable Ollama tag (e.g. `OLLAMA_MODEL=llama3.1`).

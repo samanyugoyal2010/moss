@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from moss import MossClient, QueryOptions
 from pydantic import BaseModel, Field
+from pipecat.adapters.schemas.direct_function import tool_options
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
@@ -32,12 +33,9 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
-    MetricsFrame,
-    TranscriptionFrame,
     TTSSpeakFrame,
     UserStartedSpeakingFrame,
 )
-from pipecat.metrics.metrics import TTFBMetricsData
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -47,6 +45,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
+from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.ollama.llm import OLLamaLLMService
 from pipecat.services.piper.tts import PiperTTSService
 from pipecat.services.whisper.stt import Model as WhisperModel
@@ -66,7 +65,7 @@ load_dotenv()
 
 INDEX_NAME = os.getenv("MOSS_INDEX_NAME", "system-design-rubric")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "auto")
 PIPER_VOICE = os.getenv("PIPER_VOICE", "en_US-lessac-medium")
@@ -74,7 +73,11 @@ PIPER_VOICE = os.getenv("PIPER_VOICE", "en_US-lessac-medium")
 BASE_SYSTEM_PROMPT = (
     "You are an expert System Design Interview Coach conducting a live voice interview. "
     "Ask probing follow-ups, push for trade-offs, and keep answers concise enough to speak aloud. "
-    "Avoid markdown, bullets, and emojis."
+    "Avoid markdown, bullets, and emojis. "
+    "After the candidate finishes a substantive system design answer, call grade_candidate_answer "
+    "with their answer text before asking your next question. "
+    "Skip the tool for greetings, topic picks, or one-word clarifications. "
+    "Never speak scores, grades, or improvement tips aloud — the assist panel shows those."
 )
 
 moss_client: MossClient | None = None
@@ -85,15 +88,6 @@ ICE_SERVERS = [IceServer(urls="stun:stun.l.google.com:19302")]
 small_webrtc_handler = SmallWebRTCRequestHandler(ice_servers=ICE_SERVERS)
 
 
-class LatencySnapshot(BaseModel):
-    type: str = "latency"
-    stt_ms: float | None = None
-    moss_ms: float | None = None
-    llm_ttft_ms: float | None = None
-    total_ms: float | None = None
-    interrupted: bool = False
-
-
 class GradeResult(BaseModel):
     type: str = "grade_result"
     topic: str | None = None
@@ -101,6 +95,14 @@ class GradeResult(BaseModel):
     max_score: int = 5
     summary: str
     tips: list[str] = Field(default_factory=list)
+
+
+class InterviewAssistState:
+    """Shared question text for the Assist panel and grading tool."""
+
+    def __init__(self) -> None:
+        self.last_question: str | None = None
+        self.bot_buf: list[str] = []
 
 
 class MossContextInjector(FrameProcessor):
@@ -123,18 +125,9 @@ class MossContextInjector(FrameProcessor):
         self.last_rubric_id: str | None = None
         self.last_rubric_text: str | None = None
         self.last_user_answer: str | None = None
-        self._turn_started_at: float | None = None
-        self._stt_ended_at: float | None = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
-
-        if isinstance(frame, UserStartedSpeakingFrame):
-            self._turn_started_at = time.perf_counter()
-            self._stt_ended_at = None
-
-        if isinstance(frame, TranscriptionFrame) and frame.text.strip():
-            self._stt_ended_at = time.perf_counter()
 
         if isinstance(frame, LLMContextFrame):
             await self._inject_rubric(frame)
@@ -164,7 +157,6 @@ class MossContextInjector(FrameProcessor):
 
         if not results.docs:
             logger.info(f"Moss returned no docs ({self.last_moss_ms:.2f} ms)")
-            await self._emit_partial_latency()
             return
 
         top = results.docs[0]
@@ -180,136 +172,10 @@ class MossContextInjector(FrameProcessor):
             f"Moss retrieved '{top.id}' in {self.last_moss_ms:.2f} ms "
             f"(score={top.score:.3f})"
         )
-        await self._emit_partial_latency()
-
-    async def _emit_partial_latency(self) -> None:
-        stt_ms: float | None = None
-        if self._turn_started_at is not None and self._stt_ended_at is not None:
-            stt_ms = (self._stt_ended_at - self._turn_started_at) * 1000.0
-
-        payload = LatencySnapshot(
-            stt_ms=stt_ms,
-            moss_ms=self.last_moss_ms,
-        ).model_dump()
-        await self.push_frame(
-            RTVIServerMessageFrame(data=payload),
-            FrameDirection.DOWNSTREAM,
-        )
-
-
-class InterviewAssistState:
-    """Shared question text between the pre-LLM grader and post-LLM question emitter."""
-
-    def __init__(self) -> None:
-        self.last_question: str | None = None
-        self.bot_buf: list[str] = []
-
-
-class SilentAnswerGrader(FrameProcessor):
-    """On each finalized user turn, emit answer text and fire-and-forget Ollama grading."""
-
-    def __init__(
-        self,
-        moss_injector: MossContextInjector,
-        assist_state: InterviewAssistState,
-    ) -> None:
-        super().__init__()
-        self._moss = moss_injector
-        self._state = assist_state
-        self._grade_tasks: set[asyncio.Task[None]] = set()
-        self._last_graded_answer: str | None = None
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        await super().process_frame(frame, direction)
-
-        # Welcome / queued speak frames enter at the pipeline head.
-        if isinstance(frame, TTSSpeakFrame) and frame.text.strip():
-            self._state.bot_buf.append(frame.text.strip() + " ")
-            question = _extract_question("".join(self._state.bot_buf))
-            if question and question != self._state.last_question:
-                self._state.last_question = question
-                await self._emit({"type": "current_question", "text": question})
-
-        if isinstance(frame, LLMContextFrame):
-            answer = self._moss.last_user_answer or _last_user_text(frame.context)
-            if answer and answer != self._last_graded_answer:
-                self._last_graded_answer = answer
-                await self._emit({"type": "user_answer", "text": answer})
-                await self._emit(
-                    {
-                        "type": "grading_started",
-                        "topic": self._moss.last_rubric_id,
-                    }
-                )
-                self._spawn_grade(
-                    question=self._state.last_question or "General system design answer",
-                    answer=answer,
-                    rubric_id=self._moss.last_rubric_id,
-                    rubric_text=self._moss.last_rubric_text,
-                )
-
-        await self.push_frame(frame, direction)
-
-    def _spawn_grade(
-        self,
-        *,
-        question: str,
-        answer: str,
-        rubric_id: str | None,
-        rubric_text: str | None,
-    ) -> None:
-        task = asyncio.create_task(
-            self._grade_and_emit(
-                question=question,
-                answer=answer,
-                rubric_id=rubric_id,
-                rubric_text=rubric_text,
-            ),
-            name="silent-answer-grader",
-        )
-        self._grade_tasks.add(task)
-        task.add_done_callback(self._grade_tasks.discard)
-
-    async def _grade_and_emit(
-        self,
-        *,
-        question: str,
-        answer: str,
-        rubric_id: str | None,
-        rubric_text: str | None,
-    ) -> None:
-        try:
-            result = await _silent_grade_answer(
-                question=question,
-                answer=answer,
-                rubric_id=rubric_id,
-                rubric_text=rubric_text,
-            )
-            await self._emit(result.model_dump())
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"Silent grader failed: {exc}")
-            await self._emit(
-                GradeResult(
-                    topic=rubric_id,
-                    score=3,
-                    summary="Could not grade this turn automatically. Keep covering trade-offs.",
-                    tips=[
-                        "State assumptions out loud before diving into components.",
-                        "Compare at least two design alternatives with trade-offs.",
-                        "Call out bottlenecks and how you would scale them.",
-                    ],
-                ).model_dump()
-            )
-
-    async def _emit(self, payload: dict[str, Any]) -> None:
-        await self.push_frame(
-            RTVIServerMessageFrame(data=payload),
-            FrameDirection.DOWNSTREAM,
-        )
 
 
 class CoachQuestionEmitter(FrameProcessor):
-    """Capture coach utterance text after the LLM and emit current_question events."""
+    """Capture coach utterance text and emit current_question events."""
 
     def __init__(self, assist_state: InterviewAssistState) -> None:
         super().__init__()
@@ -318,6 +184,11 @@ class CoachQuestionEmitter(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
+        # Welcome / queued speak frames may enter at the pipeline head.
+        if isinstance(frame, TTSSpeakFrame) and frame.text.strip():
+            self._state.bot_buf = [frame.text.strip() + " "]
+            await self._maybe_emit_question()
+
         if isinstance(frame, LLMFullResponseStartFrame):
             self._state.bot_buf = []
 
@@ -325,42 +196,37 @@ class CoachQuestionEmitter(FrameProcessor):
             self._state.bot_buf.append(frame.text)
 
         if isinstance(frame, (LLMFullResponseEndFrame, BotStoppedSpeakingFrame)):
-            question = _extract_question("".join(self._state.bot_buf))
-            if question and question != self._state.last_question:
-                self._state.last_question = question
-                await self.push_frame(
-                    RTVIServerMessageFrame(
-                        data={"type": "current_question", "text": question}
-                    ),
-                    FrameDirection.DOWNSTREAM,
-                )
+            await self._maybe_emit_question()
 
         await self.push_frame(frame, direction)
 
+    async def _maybe_emit_question(self) -> None:
+        question = _extract_question("".join(self._state.bot_buf))
+        if question and question != self._state.last_question:
+            self._state.last_question = question
+            await self.push_frame(
+                RTVIServerMessageFrame(
+                    data={"type": "current_question", "text": question}
+                ),
+                FrameDirection.DOWNSTREAM,
+            )
 
-class LatencyMetricsBridge(FrameProcessor):
-    """Combine Moss + LLM TTFB metrics and publish interruption / HUD events."""
 
-    def __init__(self, moss_injector: MossContextInjector) -> None:
+class InterruptionBridge(FrameProcessor):
+    """Publish barge-in / interruption events for the Assist session HUD."""
+
+    def __init__(self) -> None:
         super().__init__()
-        self._moss = moss_injector
         self._bot_speaking = False
-        self._turn_user_audio_at: float | None = None
-        self._last_stt_ms: float | None = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, UserStartedSpeakingFrame):
-            self._turn_user_audio_at = time.perf_counter()
-            if self._bot_speaking:
-                await self._emit({"type": "interruption", "interrupted": True})
+        if isinstance(frame, UserStartedSpeakingFrame) and self._bot_speaking:
+            await self._emit({"type": "interruption", "interrupted": True})
 
         if isinstance(frame, InterruptionFrame) and self._bot_speaking:
             await self._emit({"type": "interruption", "interrupted": True})
-
-        if isinstance(frame, TranscriptionFrame) and self._turn_user_audio_at is not None:
-            self._last_stt_ms = (time.perf_counter() - self._turn_user_audio_at) * 1000.0
 
         if isinstance(frame, BotStartedSpeakingFrame):
             self._bot_speaking = True
@@ -368,43 +234,93 @@ class LatencyMetricsBridge(FrameProcessor):
         if isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
 
-        if isinstance(frame, MetricsFrame):
-            await self._handle_metrics(frame)
-
         await self.push_frame(frame, direction)
-
-    async def _handle_metrics(self, frame: MetricsFrame) -> None:
-        llm_ttft_ms: float | None = None
-        for item in frame.data:
-            if isinstance(item, TTFBMetricsData) and item.value is not None:
-                name = (item.processor or "").lower()
-                if "tts" in name:
-                    continue
-                llm_ttft_ms = float(item.value) * 1000.0
-                break
-
-        if llm_ttft_ms is None:
-            return
-
-        moss_ms = self._moss.last_moss_ms
-        stt_ms = self._last_stt_ms
-        parts = [p for p in (stt_ms, moss_ms, llm_ttft_ms) if p is not None]
-        total_ms = sum(parts) if parts else None
-
-        await self._emit(
-            LatencySnapshot(
-                stt_ms=stt_ms,
-                moss_ms=moss_ms,
-                llm_ttft_ms=llm_ttft_ms,
-                total_ms=total_ms,
-            ).model_dump()
-        )
 
     async def _emit(self, payload: dict[str, Any]) -> None:
         await self.push_frame(
             RTVIServerMessageFrame(data=payload),
             FrameDirection.DOWNSTREAM,
         )
+
+
+@tool_options(cancel_on_interruption=False, timeout_secs=60)
+async def grade_candidate_answer(
+    params: FunctionCallParams,
+    answer: str,
+    question: str | None = None,
+) -> None:
+    """Grade a candidate's substantive system design answer against the Moss rubric.
+
+    Call this after the candidate finishes a substantive design answer (not for
+    greetings, topic picks, or one-word clarifications). Do not narrate the score
+    or tips aloud — the assist panel shows feedback.
+
+    Args:
+        answer: The candidate's last substantive reply to grade.
+        question: Optional interview question being answered; defaults to the last coach question.
+    """
+    resources = params.app_resources or {}
+    moss: MossContextInjector | None = resources.get("moss")
+    assist: InterviewAssistState | None = resources.get("assist")
+
+    answer_text = (answer or "").strip()
+    if not answer_text and moss and moss.last_user_answer:
+        answer_text = moss.last_user_answer
+    if not answer_text:
+        await params.result_callback({"ok": False, "error": "empty_answer"})
+        return
+
+    question_text = (question or "").strip() or (
+        (assist.last_question if assist else None) or "General system design answer"
+    )
+    rubric_id = moss.last_rubric_id if moss else None
+    rubric_text = moss.last_rubric_text if moss else None
+
+    await _queue_rtvi(
+        params,
+        {"type": "user_answer", "text": answer_text},
+    )
+    await _queue_rtvi(
+        params,
+        {"type": "grading_started", "topic": rubric_id},
+    )
+
+    try:
+        result = await _silent_grade_answer(
+            question=question_text,
+            answer=answer_text,
+            rubric_id=rubric_id,
+            rubric_text=rubric_text,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Tool grader failed: {exc}")
+        result = GradeResult(
+            topic=rubric_id,
+            score=3,
+            summary="Could not grade this turn automatically. Keep covering trade-offs.",
+            tips=[
+                "State assumptions out loud before diving into components.",
+                "Compare at least two design alternatives with trade-offs.",
+                "Call out bottlenecks and how you would scale them.",
+            ],
+        )
+
+    await _queue_rtvi(params, result.model_dump())
+    await params.result_callback(
+        {
+            "ok": True,
+            "score": result.score,
+            "max_score": result.max_score,
+            "summary": result.summary,
+            "tips": result.tips,
+            "topic": result.topic,
+            "instruction": "Do not read the score or tips aloud. Continue the interview.",
+        }
+    )
+
+
+async def _queue_rtvi(params: FunctionCallParams, payload: dict[str, Any]) -> None:
+    await params.pipeline_worker.queue_frame(RTVIServerMessageFrame(data=payload))
 
 
 def _extract_question(coach_text: str) -> str | None:
@@ -561,19 +477,20 @@ async def run_interview_bot(webrtc_connection: SmallWebRTCConnection) -> None:
             settings=PiperTTSService.Settings(voice=PIPER_VOICE),
         )
 
+        moss_injector = MossContextInjector(moss_client, index_name=INDEX_NAME)
+        assist_state = InterviewAssistState()
+
         context = LLMContext(
             messages=[{"role": "system", "content": BASE_SYSTEM_PROMPT}],
+            tools=[grade_candidate_answer],
         )
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
             context,
             user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
         )
 
-        moss_injector = MossContextInjector(moss_client, index_name=INDEX_NAME)
-        assist_state = InterviewAssistState()
-        silent_grader = SilentAnswerGrader(moss_injector, assist_state)
         question_emitter = CoachQuestionEmitter(assist_state)
-        latency_bridge = LatencyMetricsBridge(moss_injector)
+        interruption_bridge = InterruptionBridge()
 
         pipeline = Pipeline(
             [
@@ -581,10 +498,9 @@ async def run_interview_bot(webrtc_connection: SmallWebRTCConnection) -> None:
                 stt,
                 user_aggregator,
                 moss_injector,
-                silent_grader,
                 llm,
                 question_emitter,
-                latency_bridge,
+                interruption_bridge,
                 tts,
                 transport.output(),
                 assistant_aggregator,
@@ -597,19 +513,33 @@ async def run_interview_bot(webrtc_connection: SmallWebRTCConnection) -> None:
                 enable_metrics=True,
                 enable_usage_metrics=True,
             ),
+            app_resources={
+                "moss": moss_injector,
+                "assist": assist_state,
+            },
         )
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport: SmallWebRTCTransport, client: Any) -> None:
             logger.info("Client connected over SmallWebRTC")
             await asyncio.sleep(0.6)
-            await worker.queue_frame(
-                TTSSpeakFrame(
-                    "Welcome to your system design interview. "
-                    "Pick a topic—WhatsApp, rate limiting, sharding, CDNs, or the CAP theorem—"
-                    "and we will dive in."
-                )
+            welcome = (
+                "Welcome to your system design interview. "
+                "Pick a topic—WhatsApp, rate limiting, sharding, CDNs, or the CAP theorem—"
+                "and we will dive in."
             )
+            assist_state.bot_buf = [welcome + " "]
+            assist_state.last_question = _extract_question(welcome)
+            if assist_state.last_question:
+                await worker.queue_frame(
+                    RTVIServerMessageFrame(
+                        data={
+                            "type": "current_question",
+                            "text": assist_state.last_question,
+                        }
+                    )
+                )
+            await worker.queue_frame(TTSSpeakFrame(welcome))
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport: SmallWebRTCTransport, client: Any) -> None:
@@ -685,77 +615,56 @@ async def health() -> dict[str, Any]:
         "moss_ready": moss_ready,
         "moss_index": INDEX_NAME,
         "ollama_ok": ollama_ok,
-        "ollama_model": OLLAMA_MODEL,
         "ollama_error": ollama_error,
+        "ollama_model": OLLAMA_MODEL,
+        "whisper_model": WHISPER_MODEL,
+        "piper_voice": PIPER_VOICE,
         "active_bots": active_bots,
-        "stack": {
-            "stt": f"whisper:{WHISPER_MODEL}",
-            "tts": f"piper:{PIPER_VOICE}",
-            "transport": "smallwebrtc",
-            "llm": f"ollama:{OLLAMA_MODEL}",
-            "retrieval": "moss",
-        },
     }
 
 
 @app.post("/api/offer")
 async def offer(request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    """WebRTC SDP offer/answer endpoint for Pipecat SmallWebRTC clients."""
-    if not moss_ready or moss_client is None:
+    if not moss_ready:
         raise HTTPException(
             status_code=503,
             detail="Moss index not loaded. Run ingest_knowledge.py and restart the server.",
         )
 
     body = await request.json()
-    try:
-        webrtc_request = SmallWebRTCRequest.from_dict(body)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"Invalid WebRTC offer: {exc}") from exc
 
     async def webrtc_connection_callback(connection: SmallWebRTCConnection) -> None:
         background_tasks.add_task(run_interview_bot, connection)
 
-    answer = await small_webrtc_handler.handle_web_request(
-        request=webrtc_request,
-        webrtc_connection_callback=webrtc_connection_callback,
-    )
-    if answer is None:
-        raise HTTPException(status_code=500, detail="Failed to produce WebRTC answer")
+    try:
+        answer = await small_webrtc_handler.handle_web_request(
+            request=SmallWebRTCRequest.from_dict(body),
+            webrtc_connection_callback=webrtc_connection_callback,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to handle WebRTC offer")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     return answer
 
 
 @app.patch("/api/offer")
-async def ice_candidate(request: Request) -> dict[str, str]:
-    """Accept trickle ICE candidates from the Pipecat SmallWebRTC client."""
+async def offer_patch(request: Request) -> dict[str, str]:
     body = await request.json()
     try:
-        raw_candidates = body.get("candidates") or []
-        candidates = [
-            IceCandidate(
-                candidate=c["candidate"],
-                sdp_mid=c.get("sdp_mid") or c.get("sdpMid") or "",
-                sdp_mline_index=int(c.get("sdp_mline_index", c.get("sdpMLineIndex", 0))),
+        await small_webrtc_handler.handle_patch_request(
+            SmallWebRTCPatchRequest(
+                pc_id=body["pc_id"],
+                candidates=[IceCandidate(**c) for c in body.get("candidates", [])],
             )
-            for c in raw_candidates
-        ]
-        patch = SmallWebRTCPatchRequest(
-            pc_id=body["pc_id"] if "pc_id" in body else body["pcId"],
-            candidates=candidates,
         )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"Invalid ICE patch: {exc}") from exc
-
-    await small_webrtc_handler.handle_patch_request(patch)
-    return {"status": "success"}
+        logger.exception("Failed to patch WebRTC ICE candidates")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(
-        "server:app",
-        host=os.getenv("BACKEND_HOST", "0.0.0.0"),
-        port=int(os.getenv("BACKEND_PORT", "8000")),
-        reload=True,
-    )
+    uvicorn.run("server:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
