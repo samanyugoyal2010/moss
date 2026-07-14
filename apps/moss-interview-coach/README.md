@@ -5,7 +5,7 @@ Real-time voice interview coach grounded by **Moss** sub-10ms hybrid retrieval. 
 | Layer | Service | Cloud key? |
 |-------|---------|------------|
 | Retrieval | Moss (`system-design-rubric`) | Yes — only required cloud creds |
-| LLM | Ollama `llama3` | No |
+| LLM | Ollama `llama3.1` (tool calling) | No |
 | STT | Whisper (faster-whisper) | No |
 | TTS | Piper | No |
 | Transport | Pipecat SmallWebRTC (P2P) | No |
@@ -14,7 +14,7 @@ Real-time voice interview coach grounded by **Moss** sub-10ms hybrid retrieval. 
 
 - Python 3.11+
 - Node.js 20+
-- [Ollama](https://ollama.com) with `llama3`
+- [Ollama](https://ollama.com) with `llama3.1`
 - Moss project credentials from [moss.dev](https://moss.dev) / [docs.moss.dev](https://docs.moss.dev)
 
 ## Setup
@@ -22,7 +22,7 @@ Real-time voice interview coach grounded by **Moss** sub-10ms hybrid retrieval. 
 ### 1. Ollama
 
 ```bash
-ollama pull llama3
+ollama pull llama3.1
 ollama serve
 ```
 
@@ -69,10 +69,13 @@ Open [http://localhost:3000](http://localhost:3000) → **Start Interview**.
 | `MOSS_PROJECT_KEY` | yes | — |
 | `MOSS_INDEX_NAME` | no | `system-design-rubric` |
 | `OLLAMA_BASE_URL` | no | `http://localhost:11434/v1` |
-| `OLLAMA_MODEL` | no | `llama3` |
+| `OLLAMA_MODEL` | no | `llama3.1` |
 | `WHISPER_MODEL` | no | `base` |
 | `WHISPER_DEVICE` | no | `auto` |
 | `PIPER_VOICE` | no | `en_US-lessac-medium` |
+| `BACKEND_HOST` | no | `0.0.0.0` |
+| `BACKEND_PORT` | no | `8000` |
+| `CORS_ORIGINS` | no | `http://localhost:3000` |
 | `NEXT_PUBLIC_BACKEND_URL` | no | `http://localhost:8000` |
 
 ## Architecture
@@ -99,4 +102,4 @@ During an active session, the **Assist** side panel shows the current coach ques
 - Assist panel reads WebRTC data-channel JSON (`type: "interruption"` / `"current_question"` / `"user_answer"` / `"grade_result"` / `"grading_started"`). Grading is LLM tool-triggered via `grade_candidate_answer`.
 - Local Whisper + Piper STT/TTS latency will usually exceed cloud Deepgram/Cartesia; Moss remains the sub-10ms retrieval hop.
 - Interruption / barge-in uses Pipecat VAD turn strategies. Active session footer: **Powered by Moss**.
-- If the coach rarely invokes tools, try a tool-capable Ollama tag (e.g. `OLLAMA_MODEL=llama3.1`).
+- Grading uses Ollama tool calling; `llama3` (no tools) will 400 — use `llama3.1` or another tool-capable model.

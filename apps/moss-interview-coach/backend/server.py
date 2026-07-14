@@ -74,10 +74,11 @@ BASE_SYSTEM_PROMPT = (
     "You are an expert System Design Interview Coach conducting a live voice interview. "
     "Ask probing follow-ups, push for trade-offs, and keep answers concise enough to speak aloud. "
     "Avoid markdown, bullets, and emojis. "
-    "After the candidate finishes a substantive system design answer, call grade_candidate_answer "
-    "with their answer text before asking your next question. "
+    "When the candidate finishes a substantive design answer: speak your short follow-up question "
+    "in the same turn, and also call grade_candidate_answer with their answer text. "
     "Skip the tool for greetings, topic picks, or one-word clarifications. "
-    "Never speak scores, grades, or improvement tips aloud — the assist panel shows those."
+    "Never speak scores, grades, or improvement tips aloud — the assist panel shows those. "
+    "Ignore tool/grade system notes; they are only for the assist panel."
 )
 
 moss_client: MossClient | None = None
@@ -103,6 +104,26 @@ class InterviewAssistState:
     def __init__(self) -> None:
         self.last_question: str | None = None
         self.bot_buf: list[str] = []
+        self.bot_speaking: bool = False
+        self._grade_generation: int = 0
+        self._grade_tasks: set[asyncio.Task[None]] = set()
+        self._grade_lock = asyncio.Lock()
+
+    def begin_grading(self) -> int:
+        """Start a new grading turn; invalidates any in-flight grade."""
+        self._grade_generation += 1
+        return self._grade_generation
+
+    def invalidate_grading(self) -> None:
+        """Discard in-flight grading (e.g. after barge-in)."""
+        self._grade_generation += 1
+
+    def grading_still_current(self, turn_id: int) -> bool:
+        return turn_id == self._grade_generation
+
+    def track_grade_task(self, task: asyncio.Task[None]) -> None:
+        self._grade_tasks.add(task)
+        task.add_done_callback(self._grade_tasks.discard)
 
 
 class MossContextInjector(FrameProcessor):
@@ -175,7 +196,7 @@ class MossContextInjector(FrameProcessor):
 
 
 class CoachQuestionEmitter(FrameProcessor):
-    """Capture coach utterance text and emit current_question events."""
+    """Emit current_question only after a full coach utterance (no mid-turn flicker)."""
 
     def __init__(self, assist_state: InterviewAssistState) -> None:
         super().__init__()
@@ -187,7 +208,7 @@ class CoachQuestionEmitter(FrameProcessor):
         # Welcome / queued speak frames may enter at the pipeline head.
         if isinstance(frame, TTSSpeakFrame) and frame.text.strip():
             self._state.bot_buf = [frame.text.strip() + " "]
-            await self._maybe_emit_question()
+            await self._maybe_emit_question(prefer_interrogative=False)
 
         if isinstance(frame, LLMFullResponseStartFrame):
             self._state.bot_buf = []
@@ -195,44 +216,54 @@ class CoachQuestionEmitter(FrameProcessor):
         if isinstance(frame, LLMTextFrame) and frame.text:
             self._state.bot_buf.append(frame.text)
 
-        if isinstance(frame, (LLMFullResponseEndFrame, BotStoppedSpeakingFrame)):
-            await self._maybe_emit_question()
+        # Emit once when the LLM finishes — not on BotStoppedSpeaking (barge-in flicker).
+        if isinstance(frame, LLMFullResponseEndFrame):
+            await self._maybe_emit_question(prefer_interrogative=True)
 
         await self.push_frame(frame, direction)
 
-    async def _maybe_emit_question(self) -> None:
-        question = _extract_question("".join(self._state.bot_buf))
-        if question and question != self._state.last_question:
-            self._state.last_question = question
-            await self.push_frame(
-                RTVIServerMessageFrame(
-                    data={"type": "current_question", "text": question}
-                ),
-                FrameDirection.DOWNSTREAM,
-            )
+    async def _maybe_emit_question(self, *, prefer_interrogative: bool) -> None:
+        question = _extract_question(
+            "".join(self._state.bot_buf),
+            prefer_interrogative=prefer_interrogative,
+        )
+        if not question or question == self._state.last_question:
+            return
+        # Ignore tiny fragments that flash during tools / interruptions.
+        if len(question) < 12:
+            return
+        self._state.last_question = question
+        await self.push_frame(
+            RTVIServerMessageFrame(
+                data={"type": "current_question", "text": question}
+            ),
+            FrameDirection.DOWNSTREAM,
+        )
 
 
 class InterruptionBridge(FrameProcessor):
-    """Publish barge-in / interruption events for the Assist session HUD."""
+    """Publish barge-in events and track when the coach is speaking."""
 
-    def __init__(self) -> None:
+    def __init__(self, assist_state: InterviewAssistState) -> None:
         super().__init__()
-        self._bot_speaking = False
+        self._assist = assist_state
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, UserStartedSpeakingFrame) and self._bot_speaking:
+        if isinstance(frame, UserStartedSpeakingFrame) and self._assist.bot_speaking:
+            self._assist.invalidate_grading()
             await self._emit({"type": "interruption", "interrupted": True})
 
-        if isinstance(frame, InterruptionFrame) and self._bot_speaking:
+        if isinstance(frame, InterruptionFrame) and self._assist.bot_speaking:
+            self._assist.invalidate_grading()
             await self._emit({"type": "interruption", "interrupted": True})
 
         if isinstance(frame, BotStartedSpeakingFrame):
-            self._bot_speaking = True
+            self._assist.bot_speaking = True
 
         if isinstance(frame, BotStoppedSpeakingFrame):
-            self._bot_speaking = False
+            self._assist.bot_speaking = False
 
         await self.push_frame(frame, direction)
 
@@ -243,7 +274,7 @@ class InterruptionBridge(FrameProcessor):
         )
 
 
-@tool_options(cancel_on_interruption=False, timeout_secs=60)
+@tool_options(cancel_on_interruption=False, timeout_secs=90)
 async def grade_candidate_answer(
     params: FunctionCallParams,
     answer: str,
@@ -251,7 +282,7 @@ async def grade_candidate_answer(
 ) -> None:
     """Grade a candidate's substantive system design answer against the Moss rubric.
 
-    Call this after the candidate finishes a substantive design answer (not for
+    Call this when the candidate finishes a substantive design answer (not for
     greetings, topic picks, or one-word clarifications). Do not narrate the score
     or tips aloud — the assist panel shows feedback.
 
@@ -267,7 +298,13 @@ async def grade_candidate_answer(
     if not answer_text and moss and moss.last_user_answer:
         answer_text = moss.last_user_answer
     if not answer_text:
-        await params.result_callback({"ok": False, "error": "empty_answer"})
+        await params.result_callback(
+            {
+                "ok": False,
+                "error": "empty_answer",
+                "instruction": "Continue the spoken interview. Do not mention grading.",
+            }
+        )
         return
 
     question_text = (question or "").strip() or (
@@ -275,64 +312,120 @@ async def grade_candidate_answer(
     )
     rubric_id = moss.last_rubric_id if moss else None
     rubric_text = moss.last_rubric_text if moss else None
+    turn_id = assist.begin_grading() if assist else 0
 
     await _queue_rtvi(
         params,
-        {"type": "user_answer", "text": answer_text},
+        {"type": "user_answer", "text": answer_text, "turn_id": turn_id},
     )
     await _queue_rtvi(
         params,
-        {"type": "grading_started", "topic": rubric_id},
+        {"type": "grading_started", "topic": rubric_id, "turn_id": turn_id},
     )
 
-    try:
-        result = await _silent_grade_answer(
-            question=question_text,
-            answer=answer_text,
-            rubric_id=rubric_id,
-            rubric_text=rubric_text,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Tool grader failed: {exc}")
-        result = GradeResult(
-            topic=rubric_id,
-            score=3,
-            summary="Could not grade this turn automatically. Keep covering trade-offs.",
-            tips=[
-                "State assumptions out loud before diving into components.",
-                "Compare at least two design alternatives with trade-offs.",
-                "Call out bottlenecks and how you would scale them.",
-            ],
-        )
-
-    await _queue_rtvi(params, result.model_dump())
+    # Ack immediately so Pipecat does not block speech or reinject a long grade into the LLM.
     await params.result_callback(
         {
             "ok": True,
-            "score": result.score,
-            "max_score": result.max_score,
-            "summary": result.summary,
-            "tips": result.tips,
-            "topic": result.topic,
-            "instruction": "Do not read the score or tips aloud. Continue the interview.",
+            "status": "queued",
+            "instruction": "Continue speaking your follow-up. Never read scores or tips aloud.",
         }
     )
+
+    if assist is None:
+        return
+
+    worker = params.pipeline_worker
+
+    async def _background_grade() -> None:
+        try:
+            # Let the coach finish speaking / TTFT before competing for Ollama GPU.
+            await _wait_until_coach_quiet(assist, timeout_secs=12.0)
+            if not assist.grading_still_current(turn_id):
+                return
+            async with assist._grade_lock:
+                if not assist.grading_still_current(turn_id):
+                    return
+                # Brief extra settle so Whisper/Piper aren't fighting inference.
+                await asyncio.sleep(0.35)
+                if not assist.grading_still_current(turn_id):
+                    return
+                try:
+                    result = await _silent_grade_answer(
+                        question=question_text,
+                        answer=answer_text,
+                        rubric_id=rubric_id,
+                        rubric_text=rubric_text,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"Background grader failed: {exc}")
+                    result = GradeResult(
+                        topic=rubric_id,
+                        score=3,
+                        summary=(
+                            "Could not grade this turn automatically. "
+                            "Keep covering trade-offs."
+                        ),
+                        tips=[
+                            "State assumptions out loud before diving into components.",
+                            "Compare at least two design alternatives with trade-offs.",
+                            "Call out bottlenecks and how you would scale them.",
+                        ],
+                    )
+            if not assist.grading_still_current(turn_id):
+                return
+            grade_payload = result.model_dump()
+            grade_payload["turn_id"] = turn_id
+            await worker.queue_frame(RTVIServerMessageFrame(data=grade_payload))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Background grade task crashed: {exc}")
+
+    task = asyncio.create_task(_background_grade(), name=f"moss-grade-{turn_id}")
+    assist.track_grade_task(task)
 
 
 async def _queue_rtvi(params: FunctionCallParams, payload: dict[str, Any]) -> None:
     await params.pipeline_worker.queue_frame(RTVIServerMessageFrame(data=payload))
 
 
-def _extract_question(coach_text: str) -> str | None:
+async def _wait_until_coach_quiet(
+    assist: InterviewAssistState,
+    *,
+    timeout_secs: float,
+) -> None:
+    deadline = time.perf_counter() + timeout_secs
+    # First wait out any active TTS / speaking window.
+    while assist.bot_speaking and time.perf_counter() < deadline:
+        await asyncio.sleep(0.12)
+    # Small quiet period so a multi-segment utterance can finish.
+    quiet_for = 0.0
+    while time.perf_counter() < deadline:
+        if assist.bot_speaking:
+            quiet_for = 0.0
+        else:
+            quiet_for += 0.12
+            if quiet_for >= 0.45:
+                return
+        await asyncio.sleep(0.12)
+
+
+def _extract_question(
+    coach_text: str,
+    *,
+    prefer_interrogative: bool = True,
+) -> str | None:
     text = re.sub(r"\s+", " ", coach_text).strip()
     if not text:
         return None
-    # Prefer the last interrogative sentence.
     parts = re.split(r"(?<=[.?!])\s+", text)
     questions = [p.strip() for p in parts if "?" in p]
     if questions:
         return questions[-1]
-    # Fall back to the last sentence / clause so the panel always has something.
+    if prefer_interrogative:
+        # Avoid flashing non-questions mid interview when tools interleave text.
+        return None
     return parts[-1] if parts else text
 
 
@@ -490,7 +583,7 @@ async def run_interview_bot(webrtc_connection: SmallWebRTCConnection) -> None:
         )
 
         question_emitter = CoachQuestionEmitter(assist_state)
-        interruption_bridge = InterruptionBridge()
+        interruption_bridge = InterruptionBridge(assist_state)
 
         pipeline = Pipeline(
             [
@@ -529,7 +622,9 @@ async def run_interview_bot(webrtc_connection: SmallWebRTCConnection) -> None:
                 "and we will dive in."
             )
             assist_state.bot_buf = [welcome + " "]
-            assist_state.last_question = _extract_question(welcome)
+            assist_state.last_question = _extract_question(
+                welcome, prefer_interrogative=False
+            )
             if assist_state.last_question:
                 await worker.queue_frame(
                     RTVIServerMessageFrame(
@@ -667,4 +762,9 @@ async def offer_patch(request: Request) -> dict[str, str]:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("server:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
+    uvicorn.run(
+        "server:app",
+        host=os.getenv("BACKEND_HOST", "0.0.0.0"),
+        port=int(os.getenv("BACKEND_PORT", "8000")),
+        reload=True,
+    )

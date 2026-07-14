@@ -18,6 +18,7 @@ type AssistPanelState = {
   currentQuestion: string | null;
   userAnswer: string | null;
   grading: boolean;
+  gradingTurnId: number | null;
   feedback: GradeFeedback | null;
 };
 
@@ -25,6 +26,7 @@ const EMPTY_ASSIST: AssistPanelState = {
   currentQuestion: null,
   userAnswer: null,
   grading: false,
+  gradingTurnId: null,
   feedback: null,
 };
 
@@ -80,51 +82,69 @@ export default function HomePage() {
     if (msg.type === "interruption" && msg.interrupted) {
       setInterruptCount((c) => c + 1);
       setInterruptFlash(true);
+      // Drop the current turn so a late grade_result for it cannot land.
+      setAssist((prev) => ({ ...prev, grading: false, gradingTurnId: null }));
       window.setTimeout(() => setInterruptFlash(false), 900);
       return;
     }
 
     if (msg.type === "current_question" && typeof msg.text === "string") {
-      setAssist((prev) => ({
-        ...prev,
-        currentQuestion: msg.text as string,
-      }));
+      const next = msg.text.trim();
+      if (!next) return;
+      setAssist((prev) =>
+        prev.currentQuestion === next ? prev : { ...prev, currentQuestion: next },
+      );
       return;
     }
 
     if (msg.type === "user_answer" && typeof msg.text === "string") {
+      const turnId = typeof msg.turn_id === "number" ? msg.turn_id : null;
+      const answer = msg.text.trim();
       setAssist((prev) => ({
         ...prev,
-        userAnswer: msg.text as string,
+        userAnswer: answer,
         grading: true,
+        gradingTurnId: turnId ?? prev.gradingTurnId,
         feedback: null,
       }));
       return;
     }
 
     if (msg.type === "grading_started") {
-      setAssist((prev) => ({ ...prev, grading: true }));
+      const turnId = typeof msg.turn_id === "number" ? msg.turn_id : null;
+      setAssist((prev) => ({
+        ...prev,
+        grading: true,
+        gradingTurnId: turnId ?? prev.gradingTurnId,
+      }));
       return;
     }
 
     if (msg.type === "grade_result") {
+      const turnId = typeof msg.turn_id === "number" ? msg.turn_id : null;
       const tips = Array.isArray(msg.tips)
         ? msg.tips.filter((t): t is string => typeof t === "string")
         : [];
-      setAssist((prev) => ({
-        ...prev,
-        grading: false,
-        feedback: {
-          topic: typeof msg.topic === "string" ? msg.topic : null,
-          score: typeof msg.score === "number" ? msg.score : 3,
-          maxScore: typeof msg.max_score === "number" ? msg.max_score : 5,
-          summary:
-            typeof msg.summary === "string"
-              ? msg.summary
-              : "Review the rubric points for this topic.",
-          tips,
-        },
-      }));
+      setAssist((prev) => {
+        // Prefer turn-scoped grades: ignore stale or post-interrupt results.
+        if (turnId !== null && turnId !== prev.gradingTurnId) {
+          return prev;
+        }
+        return {
+          ...prev,
+          grading: false,
+          feedback: {
+            topic: typeof msg.topic === "string" ? msg.topic : null,
+            score: typeof msg.score === "number" ? msg.score : 3,
+            maxScore: typeof msg.max_score === "number" ? msg.max_score : 5,
+            summary:
+              typeof msg.summary === "string"
+                ? msg.summary
+                : "Review the rubric points for this topic.",
+            tips,
+          },
+        };
+      });
       return;
     }
   }, []);
@@ -213,8 +233,10 @@ export default function HomePage() {
           },
           onBotStoppedSpeaking: () => {
             setAiTalking(false);
+            // Fallback only when server hasn't delivered a question yet — never
+            // overwrite a settled server question (prevents sidebar thrash).
             const question = extractQuestionFromBotText(botTranscriptBuf.current);
-            if (question) {
+            if (question && question.includes("?") && question.length >= 12) {
               setAssist((prev) =>
                 prev.currentQuestion ? prev : { ...prev, currentQuestion: question },
               );
@@ -225,11 +247,14 @@ export default function HomePage() {
           onLocalAudioLevel: (level: number) => setLocalLevel(level),
           onRemoteAudioLevel: (level: number) => setRemoteLevel(level),
           onUserTranscript: (data) => {
+            // Server tool events own the Assist answer snippet; transcript is
+            // only a quiet fallback so Whisper partials don't flicker the panel.
             if (!data.final || !data.text.trim()) return;
-            setAssist((prev) => ({
-              ...prev,
-              userAnswer: data.text.trim(),
-            }));
+            const snippet = data.text.trim();
+            setAssist((prev) => {
+              if (prev.grading || prev.userAnswer) return prev;
+              return { ...prev, userAnswer: snippet };
+            });
           },
           onBotTranscript: (data) => {
             if (!data.text) return;
@@ -337,7 +362,7 @@ function IdleView({ onStart, error }: { onStart: () => void; error: string | nul
         >
           Start Interview
         </button>
-        <span className="text-sm text-[var(--fog)]">Whisper · Ollama llama3 · Piper</span>
+        <span className="text-sm text-[var(--fog)]">Whisper · Ollama llama3.1 · Piper</span>
       </div>
       {error && (
         <p className="mt-6 max-w-xl rounded-md border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-4 py-3 text-sm text-[var(--danger)]">
@@ -540,8 +565,11 @@ function AssistPanel({ assist }: { assist: AssistPanelState }) {
               <p className="text-sm leading-relaxed text-[var(--cream)]">{feedback.summary}</p>
               {feedback.tips.length > 0 && (
                 <ul className="space-y-2 border-t border-[var(--cream)]/10 pt-3">
-                  {feedback.tips.map((tip) => (
-                    <li key={tip} className="flex gap-2 text-sm leading-snug text-[var(--fog)]">
+                  {feedback.tips.map((tip, i) => (
+                    <li
+                      key={`${feedback.score}-${i}`}
+                      className="flex gap-2 text-sm leading-snug text-[var(--fog)]"
+                    >
                       <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-[var(--accent)]" />
                       <span>{tip}</span>
                     </li>
