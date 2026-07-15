@@ -25,12 +25,39 @@ const POLL_INTERVAL_MS = 2_000;
 const MAX_CONSECUTIVE_ERRORS = 3;
 const DEFAULT_MAX_WAIT_SECONDS = 300;
 
-type ManageResponse = Record<string, unknown>;
+function extractErrorMessage(data: unknown, status: number, fallbackPrefix: string): string {
+	if (data && typeof data === 'object' && !Array.isArray(data)) {
+		const error = (data as Record<string, unknown>).error;
+		if (typeof error === 'string' && error.trim()) {
+			return error;
+		}
+		const message = (data as Record<string, unknown>).message;
+		if (typeof message === 'string' && message.trim()) {
+			return message;
+		}
+	}
+	return `${fallbackPrefix} ${status}`;
+}
 
-async function manageRequest(
+async function parseResponseBody(response: Response): Promise<unknown> {
+	const text = await response.text();
+	if (!text) {
+		return {};
+	}
+	try {
+		return JSON.parse(text) as unknown;
+	} catch {
+		const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 200);
+		throw new Error(
+			`Moss API returned non-JSON response (${response.status}): ${snippet || '(empty)'}`,
+		);
+	}
+}
+
+export async function manageRequest(
 	credentials: MossCredentials,
 	body: Record<string, unknown>,
-): Promise<ManageResponse> {
+): Promise<unknown> {
 	const response = await fetch(CLOUD_MANAGE_URL, {
 		method: 'POST',
 		headers: {
@@ -45,20 +72,10 @@ async function manageRequest(
 		signal: AbortSignal.timeout(MANAGE_TIMEOUT_MS),
 	});
 
-	const text = await response.text();
-	let data: ManageResponse = {};
-	if (text) {
-		try {
-			data = JSON.parse(text) as ManageResponse;
-		} catch {
-			throw new Error(`Moss API returned non-JSON response (${response.status}): ${text}`);
-		}
-	}
+	const data = await parseResponseBody(response);
 
 	if (!response.ok) {
-		const message =
-			typeof data.error === 'string' ? data.error : `Moss API error ${response.status}`;
-		throw new Error(message);
+		throw new Error(extractErrorMessage(data, response.status, 'Moss API error'));
 	}
 
 	return data;
@@ -96,20 +113,39 @@ export function serializeBulkPayload(docs: MossDocument[]): ArrayBuffer {
 }
 
 export function parseDocuments(raw: unknown): MossDocument[] {
-	if (typeof raw === 'string') {
-		return parseDocuments(JSON.parse(raw) as unknown);
+	let value = raw;
+	if (typeof value === 'string') {
+		try {
+			value = JSON.parse(value) as unknown;
+		} catch {
+			throw new Error('Documents must be valid JSON (array of { id, text, metadata? } objects)');
+		}
 	}
 
-	if (!Array.isArray(raw)) {
+	if (!Array.isArray(value)) {
 		throw new Error('Documents must be a JSON array of { id, text, metadata? } objects');
 	}
 
-	return raw.map((doc, index) => {
+	return value.map((doc, index) => {
 		if (!doc || typeof doc !== 'object') {
 			throw new Error(`Document at index ${index} must be an object`);
 		}
 		const record = doc as Record<string, unknown>;
-		if (typeof record.id !== 'string' || typeof record.text !== 'string') {
+
+		const id =
+			typeof record.id === 'string'
+				? record.id
+				: typeof record.id === 'number'
+					? String(record.id)
+					: null;
+		const text =
+			typeof record.text === 'string'
+				? record.text
+				: typeof record.text === 'number'
+					? String(record.text)
+					: null;
+
+		if (id === null || text === null) {
 			throw new Error(`Document at index ${index} requires string "id" and "text" fields`);
 		}
 
@@ -119,17 +155,20 @@ export function parseDocuments(raw: unknown): MossDocument[] {
 				throw new Error(`Document at index ${index} metadata must be an object of string values`);
 			}
 			metadata = {};
-			for (const [key, value] of Object.entries(record.metadata as Record<string, unknown>)) {
-				if (typeof value !== 'string') {
+			for (const [key, metaValue] of Object.entries(record.metadata as Record<string, unknown>)) {
+				if (typeof metaValue === 'string') {
+					metadata[key] = metaValue;
+				} else if (typeof metaValue === 'number' || typeof metaValue === 'boolean') {
+					metadata[key] = String(metaValue);
+				} else {
 					throw new Error(
-						`Document at index ${index} metadata.${key} must be a string (got ${typeof value})`,
+						`Document at index ${index} metadata.${key} must be a string (got ${typeof metaValue})`,
 					);
 				}
-				metadata[key] = value;
 			}
 		}
 
-		return { id: record.id, text: record.text, ...(metadata ? { metadata } : {}) };
+		return { id, text, ...(metadata ? { metadata } : {}) };
 	});
 }
 
@@ -141,7 +180,11 @@ export function parseStringList(raw: unknown): string[] {
 		const trimmed = raw.trim();
 		if (!trimmed) return [];
 		if (trimmed.startsWith('[')) {
-			return parseStringList(JSON.parse(trimmed) as unknown);
+			try {
+				return parseStringList(JSON.parse(trimmed) as unknown);
+			} catch {
+				throw new Error('Document IDs JSON array is invalid');
+			}
 		}
 		return trimmed
 			.split(/[\n,]/)
@@ -151,13 +194,32 @@ export function parseStringList(raw: unknown): string[] {
 	return [];
 }
 
+/** Normalize API payloads so n8n returnJsonArray always gets an object or object[]. */
+export function normalizeExecutionData(data: unknown): Record<string, unknown> | Record<string, unknown>[] {
+	if (Array.isArray(data)) {
+		return data.map((item, index) => {
+			if (item && typeof item === 'object' && !Array.isArray(item)) {
+				return item as Record<string, unknown>;
+			}
+			return { value: item, index };
+		});
+	}
+
+	if (data && typeof data === 'object') {
+		return data as Record<string, unknown>;
+	}
+
+	return { result: data };
+}
+
 async function uploadWithRetries(uploadUrl: string, payload: ArrayBuffer): Promise<void> {
 	let lastStatus = 0;
+	const body = Buffer.from(payload);
 
 	for (let attempt = 0; attempt < MAX_UPLOAD_RETRIES; attempt++) {
 		const response = await fetch(uploadUrl, {
 			method: 'PUT',
-			body: payload,
+			body,
 			headers: { 'Content-Type': 'application/octet-stream' },
 			signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
 		});
@@ -172,6 +234,13 @@ async function uploadWithRetries(uploadUrl: string, payload: ArrayBuffer): Promi
 	throw new Error(`Failed to upload Moss index payload (HTTP ${lastStatus})`);
 }
 
+function normalizeJobStatus(status: unknown): string {
+	return String(status ?? '')
+		.trim()
+		.toLowerCase()
+		.replace(/\s+/g, '_');
+}
+
 export async function pollJobUntilComplete(
 	credentials: MossCredentials,
 	jobId: string,
@@ -184,9 +253,9 @@ export async function pollJobUntilComplete(
 	let consecutiveErrors = 0;
 
 	while (Date.now() - start < maxWaitMs) {
-		let status: ManageResponse;
+		let statusPayload: unknown;
 		try {
-			status = await manageRequest(credentials, {
+			statusPayload = await manageRequest(credentials, {
 				action: 'getJobStatus',
 				jobId,
 			});
@@ -204,14 +273,17 @@ export async function pollJobUntilComplete(
 			continue;
 		}
 
-		const jobStatus = String(status.status ?? '')
-			.toLowerCase()
-			.replace(/\s+/g, '_');
+		const status =
+			statusPayload && typeof statusPayload === 'object' && !Array.isArray(statusPayload)
+				? (statusPayload as Record<string, unknown>)
+				: {};
+		const jobStatus = normalizeJobStatus(status.status);
+		const compact = jobStatus.replace(/_/g, '');
 
-		if (jobStatus === 'completed') {
+		if (jobStatus === 'completed' || compact === 'completed') {
 			return { jobId, indexName, docCount, status: 'completed' };
 		}
-		if (jobStatus === 'failed') {
+		if (jobStatus === 'failed' || compact === 'failed') {
 			throw new Error(`Moss job failed: ${String(status.error ?? 'unknown error')}`);
 		}
 
@@ -225,14 +297,19 @@ export async function pollJobUntilComplete(
 
 async function maybeWaitForJob(
 	credentials: MossCredentials,
-	response: ManageResponse,
+	response: unknown,
 	indexName: string,
 	docCount: number,
 	wait?: WaitOptions,
 ): Promise<Record<string, unknown>> {
-	const jobId = typeof response.jobId === 'string' ? response.jobId : '';
+	const payload =
+		response && typeof response === 'object' && !Array.isArray(response)
+			? (response as Record<string, unknown>)
+			: { result: response };
+
+	const jobId = typeof payload.jobId === 'string' ? payload.jobId : '';
 	if (!wait?.waitForCompletion || !jobId) {
-		return response;
+		return payload;
 	}
 
 	return pollJobUntilComplete(
@@ -255,13 +332,13 @@ export async function createIndex(
 		throw new Error('Create Index requires at least one document');
 	}
 
-	const init = await manageRequest(credentials, {
+	const init = (await manageRequest(credentials, {
 		action: 'initUpload',
 		indexName,
 		modelId,
 		docCount: docs.length,
 		dimension: 0,
-	});
+	})) as Record<string, unknown>;
 
 	const jobId = String(init.jobId ?? '');
 	const uploadUrl = String(init.uploadUrl ?? '');
@@ -278,7 +355,7 @@ export async function createIndex(
 
 	return maybeWaitForJob(
 		credentials,
-		{ ...started, jobId, indexName, docCount: docs.length },
+		{ ...(started as Record<string, unknown>), jobId, indexName, docCount: docs.length },
 		indexName,
 		docs.length,
 		wait,
@@ -345,21 +422,30 @@ export async function getIndex(
 	credentials: MossCredentials,
 	indexName: string,
 ): Promise<Record<string, unknown>> {
-	return manageRequest(credentials, { action: 'getIndex', indexName });
+	return (await manageRequest(credentials, { action: 'getIndex', indexName })) as Record<
+		string,
+		unknown
+	>;
 }
 
 export async function deleteIndex(
 	credentials: MossCredentials,
 	indexName: string,
 ): Promise<Record<string, unknown>> {
-	return manageRequest(credentials, { action: 'deleteIndex', indexName });
+	return (await manageRequest(credentials, { action: 'deleteIndex', indexName })) as Record<
+		string,
+		unknown
+	>;
 }
 
 export async function getJobStatus(
 	credentials: MossCredentials,
 	jobId: string,
 ): Promise<Record<string, unknown>> {
-	return manageRequest(credentials, { action: 'getJobStatus', jobId });
+	return (await manageRequest(credentials, { action: 'getJobStatus', jobId })) as Record<
+		string,
+		unknown
+	>;
 }
 
 export async function queryIndex(
@@ -383,21 +469,15 @@ export async function queryIndex(
 		signal: AbortSignal.timeout(QUERY_TIMEOUT_MS),
 	});
 
-	const text = await response.text();
-	let data: Record<string, unknown> = {};
-	if (text) {
-		try {
-			data = JSON.parse(text) as Record<string, unknown>;
-		} catch {
-			throw new Error(`Moss query returned non-JSON response (${response.status}): ${text}`);
-		}
-	}
+	const data = await parseResponseBody(response);
 
 	if (!response.ok) {
-		const message =
-			typeof data.error === 'string' ? data.error : `Moss query error ${response.status}`;
-		throw new Error(message);
+		throw new Error(extractErrorMessage(data, response.status, 'Moss query error'));
 	}
 
-	return data;
+	if (data && typeof data === 'object' && !Array.isArray(data)) {
+		return data as Record<string, unknown>;
+	}
+
+	return { result: data };
 }

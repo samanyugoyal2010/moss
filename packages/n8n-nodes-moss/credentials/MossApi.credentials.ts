@@ -51,6 +51,11 @@ export class MossApi implements ICredentialType {
 			baseURL: 'https://service.usemoss.dev/v1',
 			url: '/manage',
 			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-project-key': '={{$credentials.projectKey}}',
+				'x-service-version': 'v1',
+			},
 			body: {
 				action: 'listIndexes',
 				projectId: '={{$credentials.projectId}}',

@@ -16,6 +16,7 @@ import {
 	getIndex,
 	getJobStatus,
 	listIndexes,
+	normalizeExecutionData,
 	parseDocuments,
 	parseStringList,
 	queryIndex,
@@ -291,6 +292,9 @@ export class Moss implements INodeType {
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
+		if (!items.length) {
+			items.push({ json: {} });
+		}
 		const returnData: INodeExecutionData[] = [];
 		const credentials = await getMossCredentials.call(this);
 
@@ -384,7 +388,9 @@ export class Moss implements INodeType {
 				}
 
 				const executionData = this.helpers.constructExecutionMetaData(
-					this.helpers.returnJsonArray(responseData as IDataObject | IDataObject[]),
+					this.helpers.returnJsonArray(
+						normalizeExecutionData(responseData) as IDataObject | IDataObject[],
+					),
 					{ itemData: { item: itemIndex } },
 				);
 				returnData.push(...executionData);
