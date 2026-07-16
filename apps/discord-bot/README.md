@@ -2,6 +2,15 @@
 
 This example turns a Discord server into a small semantic knowledge base. A moderator can add knowledge with `!moss-index <text>`, and anyone can search it with `!ask <question>`. Each indexed item keeps the author, channel, and jump URL as Moss metadata.
 
+## Moss branding
+
+In the Discord Developer Portal, set the application name and bot display name
+to `Moss`, use the Moss logo as the application icon, and add a description
+such as `Semantic search for your Discord knowledge base`. The bot sets its
+online activity to `semantic search with Moss` when it connects. The portal
+name, icon, and description are Discord-managed assets and cannot be changed
+by the bot token at runtime.
+
 ## Setup
 
 Create a Discord application and bot in the [Discord Developer Portal](https://discord.com/developers/applications). Under **Bot**, enable **Message Content Intent**. Under **Installation**, use the `bot` and `applications.commands` scopes and grant only these permissions:

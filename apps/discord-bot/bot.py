@@ -17,6 +17,8 @@ REQUIRED_ENV: Final = (
     "MOSS_PROJECT_KEY",
     "MOSS_INDEX_NAME",
 )
+BOT_BRAND: Final = "Moss"
+BOT_ACTIVITY: Final = "semantic search with Moss"
 
 
 def build_document(message: discord.Message, text: str | None = None) -> DocumentInfo:
@@ -99,24 +101,28 @@ def create_bot() -> MossDiscordBot:
 
     @bot.event
     async def on_ready() -> None:
-        print(f"Logged in as {bot.user}; Moss index: {bot.index_name}")
+        await bot.change_presence(
+            status=discord.Status.online,
+            activity=discord.Game(name=BOT_ACTIVITY),
+        )
+        print(f"{BOT_BRAND} bot logged in as {bot.user}; Moss index: {bot.index_name}")
 
     @bot.command(name="moss-index")
     @commands.has_guild_permissions(manage_messages=True)
     async def index_message(ctx: commands.Context[commands.Bot], *, text: str) -> None:
         """Index explicit knowledge text: !moss-index The refund policy is ..."""
         await bot.add_message_to_index(ctx.message, text)
-        await ctx.send("Indexed that knowledge in Moss.")
+        await ctx.send(f"{BOT_BRAND} indexed that knowledge.")
 
     @bot.command(name="ask")
     async def ask(ctx: commands.Context[commands.Bot], *, question: str) -> None:
         """Search Moss and return the most relevant indexed messages."""
         if not bot.index_exists:
-            await ctx.send("The Moss index is empty. Ask a moderator to run `!moss-index <text>`.")
+            await ctx.send(f"The {BOT_BRAND} index is empty. Ask a moderator to run `!moss-index <text>`.")
             return
         results = await bot.moss.query(bot.index_name, question, QueryOptions(top_k=3))
         if not results.docs:
-            await ctx.send("I couldn't find anything relevant in the Moss index.")
+            await ctx.send(f"{BOT_BRAND} couldn't find anything relevant in the index.")
             return
         lines = [f"**{result.score:.2f}** {result.text}" for result in results.docs]
         await send_chunks(ctx, "\n".join(lines))
@@ -132,18 +138,24 @@ def create_bot() -> MossDiscordBot:
         else:
             await bot.moss.create_index(bot.index_name, [document], "moss-minilm")
             bot.index_exists = True
-        await interaction.followup.send("Indexed that knowledge in Moss.")
+        await interaction.followup.send(f"{BOT_BRAND} indexed that knowledge.")
 
     @bot.tree.command(name="ask", description="Search the Moss knowledge index")
     async def slash_ask(interaction: discord.Interaction, question: str) -> None:
         """Slash-command equivalent of !ask."""
         if not bot.index_exists:
-            await interaction.response.send_message("The Moss index is empty.")
+            await interaction.response.send_message(
+                f"The {BOT_BRAND} index is empty.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
         await interaction.response.defer()
         results = await bot.moss.query(bot.index_name, question, QueryOptions(top_k=3))
         response = "\n".join(f"**{result.score:.2f}** {result.text}" for result in results.docs)
-        await interaction.followup.send(response[:1900] or "I couldn't find anything relevant.")
+        await interaction.followup.send(
+            response[:1900] or f"{BOT_BRAND} couldn't find anything relevant.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @bot.event
     async def on_command_error(
