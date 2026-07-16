@@ -34,6 +34,22 @@ def build_document(message: discord.Message, text: str | None = None) -> Documen
     )
 
 
+def build_interaction_document(interaction: discord.Interaction, text: str) -> DocumentInfo:
+    """Convert a slash interaction into a Moss document."""
+    channel = interaction.channel
+    return DocumentInfo(
+        id=f"interaction-{interaction.id}",
+        text=text,
+        metadata={
+            "channel_id": str(channel.id) if channel else "unknown",
+            "channel_name": getattr(channel, "name", "unknown"),
+            "author_id": str(interaction.user.id),
+            "author_name": str(interaction.user),
+            "url": "",
+        },
+    )
+
+
 class MossDiscordBot(commands.Bot):
     """Discord bot that writes messages to and searches one Moss index."""
 
@@ -49,6 +65,7 @@ class MossDiscordBot(commands.Bot):
         """Register commands and detect whether the configured index already exists."""
         indexes = await self.moss.list_indexes()
         self.index_exists = any(index.name == self.index_name for index in indexes)
+        await self.tree.sync()
 
     async def add_message_to_index(self, message: discord.Message, text: str | None = None) -> None:
         """Create the index on first use, then append subsequent messages."""
@@ -61,6 +78,13 @@ class MossDiscordBot(commands.Bot):
         else:
             await self.moss.create_index(self.index_name, [document], "moss-minilm")
             self.index_exists = True
+
+
+async def send_chunks(ctx: commands.Context[commands.Bot], text: str) -> None:
+    """Send a response without exceeding Discord's 2,000-character limit."""
+    for offset in range(0, len(text), 1900):
+        chunk = text[offset : offset + 1900]
+        await ctx.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 
 def create_bot() -> MossDiscordBot:
@@ -95,7 +119,57 @@ def create_bot() -> MossDiscordBot:
             await ctx.send("I couldn't find anything relevant in the Moss index.")
             return
         lines = [f"**{result.score:.2f}** {result.text}" for result in results.docs]
-        await ctx.send("\n".join(lines)[:2000])
+        await send_chunks(ctx, "\n".join(lines))
+
+    @bot.tree.command(name="moss-index", description="Add a knowledge item to the Moss index")
+    @discord.app_commands.checks.has_permissions(manage_messages=True)
+    async def slash_index(interaction: discord.Interaction, text: str) -> None:
+        """Slash-command equivalent of !moss-index."""
+        await interaction.response.defer()
+        document = build_interaction_document(interaction, text)
+        if bot.index_exists:
+            await bot.moss.add_docs(bot.index_name, [document])
+        else:
+            await bot.moss.create_index(bot.index_name, [document], "moss-minilm")
+            bot.index_exists = True
+        await interaction.followup.send("Indexed that knowledge in Moss.")
+
+    @bot.tree.command(name="ask", description="Search the Moss knowledge index")
+    async def slash_ask(interaction: discord.Interaction, question: str) -> None:
+        """Slash-command equivalent of !ask."""
+        if not bot.index_exists:
+            await interaction.response.send_message("The Moss index is empty.")
+            return
+        await interaction.response.defer()
+        results = await bot.moss.query(bot.index_name, question, QueryOptions(top_k=3))
+        response = "\n".join(f"**{result.score:.2f}** {result.text}" for result in results.docs)
+        await interaction.followup.send(response[:1900] or "I couldn't find anything relevant.")
+
+    @bot.event
+    async def on_command_error(
+        ctx: commands.Context[commands.Bot], error: commands.CommandError
+    ) -> None:
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send("You need the Manage Messages permission to index knowledge.")
+        elif isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send("Usage: `!moss-index <text>` or `!ask <question>`.")
+        else:
+            print(f"Command failed: {error!r}", file=sys.stderr)
+            await ctx.send("That command failed. Check the bot logs for details.")
+
+    @bot.tree.error
+    async def on_app_command_error(
+        interaction: discord.Interaction, error: discord.app_commands.AppCommandError
+    ) -> None:
+        if isinstance(error, discord.app_commands.errors.MissingPermissions):
+            message = "You need the Manage Messages permission to index knowledge."
+        else:
+            print(f"Slash command failed: {error!r}", file=sys.stderr)
+            message = "That command failed. Check the bot logs for details."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
 
     return bot
 
