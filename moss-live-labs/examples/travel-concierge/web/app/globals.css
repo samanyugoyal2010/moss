@@ -45,6 +45,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
 }
 .brand {
   display: flex;
@@ -93,6 +94,14 @@ body {
   min-height: 0;
 }
 @media (max-width: 920px) {
+  .app {
+    padding: 16px;
+    gap: 16px;
+  }
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
   .main {
     grid-template-columns: 1fr;
   }
@@ -173,12 +182,35 @@ body {
   text-align: center;
 }
 
-/* right column: two panels */
+/* right column: query line + side-by-side panels */
 .stack {
   display: flex;
   flex-direction: column;
   gap: 18px;
   min-height: 0;
+}
+.panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  flex: 1;
+  min-height: 0;
+}
+@media (max-width: 1100px) {
+  .panels {
+    grid-template-columns: 1fr;
+  }
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 .qline {
   font-size: 15px;
@@ -359,12 +391,32 @@ body {
   cursor: pointer;
   transition: transform 0.12s ease, opacity 0.12s ease;
 }
-.btn:hover {
+.btn:hover:not(:disabled) {
   transform: translateY(-1px);
 }
 .btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+.gate {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(360px, 100%);
+  margin: 0 auto 18px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--muted);
+}
+.gate input {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--text);
 }
 
 /* LiveKit overrides (light) */

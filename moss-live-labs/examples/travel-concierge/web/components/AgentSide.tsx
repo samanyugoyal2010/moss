@@ -15,6 +15,7 @@ const STATE_LABEL: Record<string, string> = {
   initializing: "warming up",
   idle: "idle",
   failed: "failed",
+  disconnected: "disconnected",
   "pre-connect-buffering": "connecting",
 };
 

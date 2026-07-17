@@ -4,7 +4,7 @@
 live session that remembers trip preferences you mention. Watch both panels on the right.
 
 ## Before you record
-- [ ] `uv run python seed_index.py` (seeds the catalog) · `uv run python agent.py dev` · `livekit-server --dev` · web at localhost:3000
+- [ ] `uv run python agent.py download-files` (once) · `uv run python seed_index.py` · `uv run python agent.py dev` · `livekit-server --dev` · web at localhost:3000
 
 ## 1 · Frame it (0:00–0:12)
 > "This concierge knows a catalog of trips — that's loaded ahead of time. But it also
@@ -18,7 +18,7 @@ live session that remembers trip preferences you mention. Watch both panels on t
 
 **[Point at the "This call · live session" panel filling up as you talk.]**
 > "Watch the live session. It's pulling the facts out of what I say — a family of four,
-> the budget, the dates — and remembering each one. In memory, in milliseconds."
+> the budget, the dates — and storing each one in an in-memory session."
 
 ## 3 · Recall (0:40–0:58)
 > "Wait, what did I say my budget was?"

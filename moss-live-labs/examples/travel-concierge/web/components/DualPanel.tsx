@@ -10,7 +10,21 @@ const decoder = new TextDecoder();
 function isDoc(value: unknown): value is Doc {
   if (!value || typeof value !== "object") return false;
   const d = value as Record<string, unknown>;
-  return typeof d.text === "string" && typeof d.score === "number" && Number.isFinite(d.score);
+  const idOk = d.id === undefined || d.id === null || typeof d.id === "string" || typeof d.id === "number";
+  return (
+    idOk &&
+    typeof d.text === "string" &&
+    typeof d.score === "number" &&
+    Number.isFinite(d.score)
+  );
+}
+
+function normalizeDoc(d: Doc, index: number): Doc & { key: string } {
+  const key =
+    d.id === undefined || d.id === null || d.id === ""
+      ? `idx-${index}`
+      : String(d.id);
+  return { ...d, id: key, key };
 }
 
 function isRetrievalPayload(value: unknown): value is RetrievalPayload {
@@ -34,16 +48,17 @@ function Hits({ docs, empty }: { docs: Doc[]; empty: string }) {
   return (
     <div className="hits">
       {docs.map((d, i) => {
-        const pct = Math.max(0, Math.min(1, d.score)) * 100;
+        const doc = normalizeDoc(d, i);
+        const pct = Math.max(0, Math.min(1, doc.score)) * 100;
         return (
-          <div className="hit" key={d.id ?? i}>
+          <div className="hit" key={doc.key}>
             <div className="top">
               <div className="bar">
                 <span style={{ width: `${pct}%` }} />
               </div>
-              <span className="score">{d.score.toFixed(2)}</span>
+              <span className="score">{doc.score.toFixed(2)}</span>
             </div>
-            <div className="text">{d.text}</div>
+            <div className="text">{doc.text}</div>
           </div>
         );
       })}
@@ -72,6 +87,11 @@ export function DualPanel() {
     }, []),
   );
 
+  const status =
+    data == null
+      ? "Waiting for retrieval results."
+      : `Updated retrieval for “${data.query}”: ${data.catalog.length} catalog hits, ${data.session.length} session facts.`;
+
   return (
     <div className="stack">
       <div className="qline">
@@ -84,26 +104,35 @@ export function DualPanel() {
         )}
       </div>
 
-      <div className="card panel panel--cloud">
-        <div className="panel-head">
-          <span className="label">
-            <span className="dot-sq" />
-            Catalog · cloud index
-          </span>
-          <span className="tag">{data ? `${data.catalog_ms.toFixed(1)}ms · pre-loaded` : "pre-loaded"}</span>
-        </div>
-        <Hits docs={data?.catalog ?? []} empty="Trips matching your question show up here." />
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {status}
       </div>
 
-      <div className="card panel panel--live">
-        <div className="panel-head">
-          <span className="label">
-            <span className="dot-sq" />
-            This call · live session
-          </span>
-          <span className="tag">{data ? `${data.session_ms.toFixed(1)}ms · in-memory` : "in-memory"}</span>
+      <div className="panels">
+        <div className="card panel panel--cloud">
+          <div className="panel-head">
+            <span className="label">
+              <span className="dot-sq" />
+              Catalog · cloud index
+            </span>
+            <span className="tag">{data ? `${data.catalog_ms.toFixed(1)}ms · pre-loaded` : "pre-loaded"}</span>
+          </div>
+          <Hits docs={data?.catalog ?? []} empty="Trips matching your question show up here." />
         </div>
-        <Hits docs={data?.session ?? []} empty="Nothing yet. Tell the concierge about your trip and it remembers it here." />
+
+        <div className="card panel panel--live">
+          <div className="panel-head">
+            <span className="label">
+              <span className="dot-sq" />
+              This call · live session
+            </span>
+            <span className="tag">{data ? `${data.session_ms.toFixed(1)}ms · in-memory` : "in-memory"}</span>
+          </div>
+          <Hits
+            docs={data?.session ?? []}
+            empty="Nothing yet. Tell the concierge about your trip and it remembers it here."
+          />
+        </div>
       </div>
     </div>
   );

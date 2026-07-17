@@ -14,7 +14,7 @@ Browser (web/)  ⟷  LiveKit room  ⟷  agent.py (STT → LLM → TTS)  ⟷  Mos
 
 ## What you need
 - A [Moss](https://moss.dev) account · [LiveKit](https://livekit.io) (local) · OpenAI (LLM),
-  Deepgram (STT), Cartesia (TTS) keys · Python 3.14+ (`uv`) and Node 18.18+.
+  Deepgram (STT), Cartesia (TTS) keys · Python 3.14 (`uv`) and Node 18.18+.
 
 ## Setup
 ```bash
@@ -39,9 +39,10 @@ cd web && npm install && cp .env.local.example .env.local && npm run dev   # loc
 Click **Start planning**, then talk: tell it your budget, dates, and who's coming, ask it
 to recall them, and ask for a recommendation.
 
-For a public deploy, set `APP_SECRET` in `web/.env.local` (and the matching
-`NEXT_PUBLIC_APP_SECRET`) so `/api/token` is not open to anonymous callers. Leave both
-unset for open local demos.
+For a public deploy, set server-only `APP_SECRET` in `web/.env.local`. Visitors enter
+that code once; the app stores an httpOnly gate cookie and then mints tokens. Leave it
+unset for open local demos. Do not use a `NEXT_PUBLIC_*` secret — anything shipped to
+the browser cannot protect `/api/token`.
 
 ## How it works
 Per turn, `agent.py`:

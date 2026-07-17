@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { AccessToken, type VideoGrant } from "livekit-server-sdk";
+import { AccessToken, TrackSource, type VideoGrant } from "livekit-server-sdk";
+import { hasValidGateCookie } from "@/lib/gate";
 
 // Copy web/.env.local.example to web/.env.local to get the `livekit-server --dev` defaults.
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
@@ -16,9 +17,9 @@ function unauthorized() {
 export async function GET(request: Request) {
   try {
     if (APP_SECRET) {
-      const auth = request.headers.get("authorization") ?? "";
-      const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-      if (token !== APP_SECRET) return unauthorized();
+      if (!hasValidGateCookie(request.headers.get("cookie"), APP_SECRET)) {
+        return unauthorized();
+      }
     }
 
     if (!LIVEKIT_URL) throw new Error("LIVEKIT_URL is not defined");
@@ -33,8 +34,9 @@ export async function GET(request: Request) {
     const grant: VideoGrant = {
       room: roomName,
       roomJoin: true,
-      canPublish: true, // publish mic
-      canPublishData: true,
+      canPublish: true,
+      canPublishSources: [TrackSource.MICROPHONE],
+      canPublishData: false, // browser only needs mic; agent publishes moss.retrieval
       canSubscribe: true,
     };
     at.addGrant(grant);

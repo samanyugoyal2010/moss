@@ -11,33 +11,62 @@ export default function Page() {
   const [conn, setConn] = useState<Conn | null>(null);
   const [roomLive, setRoomLive] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [needsGate, setNeedsGate] = useState(false);
+  const [gateSecret, setGateSecret] = useState("");
 
   const reset = useCallback(() => {
     setConn(null);
     setRoomLive(false);
   }, []);
 
+  const fetchToken = useCallback(async () => {
+    const res = await fetch("/api/token");
+    if (res.status === 401) {
+      setNeedsGate(true);
+      throw new Error("gate");
+    }
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as Conn;
+  }, []);
+
   const connect = useCallback(async () => {
     setConnecting(true);
     try {
-      const headers: HeadersInit = {};
-      const secret = process.env.NEXT_PUBLIC_APP_SECRET;
-      if (secret) headers.Authorization = `Bearer ${secret}`;
-
-      const res = await fetch("/api/token", { headers });
-      if (!res.ok) throw new Error(await res.text());
-      setConn((await res.json()) as Conn);
+      if (needsGate && gateSecret) {
+        const gateRes = await fetch("/api/gate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ secret: gateSecret }),
+        });
+        if (!gateRes.ok) {
+          alert("Access code rejected.");
+          return;
+        }
+      }
+      const next = await fetchToken();
+      setNeedsGate(false);
+      setConn(next);
       setRoomLive(false);
     } catch (err) {
+      if (err instanceof Error && err.message === "gate") {
+        // Prompt for access code; do not alert.
+        return;
+      }
       console.error("failed to get token", err);
       alert("Could not reach the token endpoint. Is the app running and LiveKit reachable?");
       reset();
     } finally {
       setConnecting(false);
     }
-  }, [reset]);
+  }, [fetchToken, gateSecret, needsGate, reset]);
 
-  const statusLabel = conn ? (roomLive ? "live" : "connecting") : "offline";
+  const statusLabel = connecting
+    ? "connecting"
+    : conn
+      ? roomLive
+        ? "live"
+        : "connecting"
+      : "offline";
 
   return (
     <div className="app">
@@ -84,8 +113,20 @@ export default function Page() {
               Ask about destinations from the catalog, tell it your budget, dates, and who&apos;s coming.
               Watch Moss pull from the pre-loaded catalog and your live conversation, together.
             </p>
-            <button className="btn" onClick={connect} disabled={connecting}>
-              {connecting ? "Connecting…" : "Start planning"}
+            {needsGate && (
+              <label className="gate">
+                <span>Access code</span>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={gateSecret}
+                  onChange={(e) => setGateSecret(e.target.value)}
+                  placeholder="Enter APP_SECRET"
+                />
+              </label>
+            )}
+            <button className="btn" onClick={connect} disabled={connecting || (needsGate && !gateSecret)}>
+              {connecting ? "Connecting…" : needsGate ? "Unlock & start" : "Start planning"}
             </button>
           </div>
         </main>
