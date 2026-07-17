@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { AccessToken, TrackSource, type VideoGrant } from "livekit-server-sdk";
-import { assertLocalDevOnly, configFromEnv } from "@/lib/tokenGuard";
+import {
+  assertLocalDevOnly,
+  configFromEnv,
+  immediatePeerFromRequest,
+} from "@/lib/tokenGuard";
 
 // Copy web/.env.local.example to web/.env.local to get the `livekit-server --dev` defaults.
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
@@ -12,7 +16,7 @@ export const revalidate = 0;
 
 // Local-dev demo: mint tokens only for loopback-bound servers unless explicitly opted in.
 export async function GET(request: Request) {
-  const denied = assertLocalDevOnly(request, TOKEN_GUARD);
+  const denied = assertLocalDevOnly(request, TOKEN_GUARD, immediatePeerFromRequest(request));
   if (denied) return denied;
 
   try {
