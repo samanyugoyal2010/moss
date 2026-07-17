@@ -70,6 +70,37 @@ class MossSemanticRetrievalAgent(Agent):
         self.moss = moss_client
         self.room = room
         self.region = region  # live-updated from the UI region picker
+        # Region updates that arrive while a turn/reply is in flight are deferred so the
+        # spoken answer stays aligned with the retrieval that already ran.
+        self._pending_region: str | None = None
+        self._turn_busy = False
+
+    def apply_region(self, region: str) -> None:
+        """Apply a UI region change, or queue it until the current reply finishes."""
+        if region not in ALLOWED_REGIONS:
+            return
+        session = getattr(self, "_session", None)
+        state = getattr(session, "agent_state", None) if session is not None else None
+        if self._turn_busy or state in ("thinking", "speaking"):
+            self._pending_region = region
+            logger.info(
+                "Region %s queued until current reply finishes (busy=%s state=%s)",
+                region,
+                self._turn_busy,
+                state,
+            )
+            return
+        self.region = region
+        self._pending_region = None
+        logger.info(f"Region filter set to {region}")
+
+    def flush_pending_region(self) -> None:
+        self._turn_busy = False
+        if self._pending_region is None:
+            return
+        self.region = self._pending_region
+        logger.info(f"Region filter set to {self.region} (applied after reply)")
+        self._pending_region = None
 
     def _encode_retrieval_payload(self, query: str, docs: list, took_ms: float, region: str) -> bytes:
         """Build a moss.retrieval JSON payload that fits LiveKit's reliable size limit."""
@@ -164,6 +195,7 @@ class MossSemanticRetrievalAgent(Agent):
             raise StopResponse()
 
         logger.info(f"User asked: {user_query}")
+        self._turn_busy = True
 
         try:
             # Re-query / re-publish until the region is still current after every await,
@@ -219,7 +251,7 @@ class MossSemanticRetrievalAgent(Agent):
             await self._publish_retrieval(user_query, None, 0.0, self.region)
             turn_ctx.add_message(role="system", content=NO_MATCH_CONTEXT)
 
-        # 3. Proceed with standard generation
+        # 3. Proceed with standard generation (_turn_busy cleared when agent returns to listening)
         await super().on_user_turn_completed(turn_ctx, new_message)
 
 
@@ -233,6 +265,7 @@ async def entrypoint(ctx: JobContext):
     # to the topic (browser often publishes as soon as the agent participant appears).
     pending_region = {"value": REGION}
     agent_holder: dict[str, MossSemanticRetrievalAgent | None] = {"agent": None}
+    session_holder: dict[str, AgentSession | None] = {"session": None}
 
     @ctx.room.on("data_received")
     def _on_data(pkt: rtc.DataPacket):
@@ -243,8 +276,9 @@ async def entrypoint(ctx: JobContext):
                     pending_region["value"] = r
                     agent = agent_holder["agent"]
                     if agent is not None:
-                        agent.region = r
-                    logger.info(f"Region filter set to {r}")
+                        agent.apply_region(r)
+                    else:
+                        logger.info(f"Region filter pending until agent ready: {r}")
                 else:
                     logger.warning(f"Ignoring unknown region {r!r} (allowed: {sorted(ALLOWED_REGIONS)})")
             except Exception as e:
@@ -275,9 +309,17 @@ async def entrypoint(ctx: JobContext):
         vad=silero.VAD.load(),
         turn_handling={"interruption": {"mode": "vad"}},
     )
+    session_holder["session"] = session
 
     agent = MossSemanticRetrievalAgent(moss_client, ctx.room, region=pending_region["value"])
+    agent._session = session  # used by apply_region to detect in-flight replies
     agent_holder["agent"] = agent
+
+    @session.on("agent_state_changed")
+    def _on_agent_state(ev):
+        # Once the agent returns to listening, apply any region queued mid-reply.
+        if ev.new_state in ("listening", "idle"):
+            agent.flush_pending_region()
 
     # Start the session with our custom MossSemanticRetrievalAgent
     await session.start(agent=agent, room=ctx.room)

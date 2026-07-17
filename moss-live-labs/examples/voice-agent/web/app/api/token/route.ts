@@ -8,6 +8,13 @@ const API_SECRET = process.env.LIVEKIT_API_SECRET;
 const ALLOW_REMOTE_TOKEN = process.env.ALLOW_REMOTE_TOKEN === "1";
 const TRUST_PROXY = process.env.TRUST_PROXY === "1";
 const TRUSTED_PROXY_HOPS = Math.max(1, Number(process.env.TRUSTED_PROXY_HOPS || "1") || 1);
+/**
+ * Explicit trusted-proxy client strategy (only when TRUST_PROXY=1):
+ * - "x-forwarded-for" (default): append-only proxies; use the rightmost trusted hop.
+ * - "x-real-ip": proxies that overwrite a single validated header.
+ * Never fall back between the two — forged X-Real-IP must not bypass XFF hop math.
+ */
+const TRUST_PROXY_HEADER = (process.env.TRUST_PROXY_HEADER || "x-forwarded-for").trim().toLowerCase();
 /** Set by `npm run dev` / `start` so unverified peers are allowed only on loopback binds. */
 const LISTEN_HOST = (process.env.MOSS_LISTEN_HOST || "").trim().toLowerCase();
 
@@ -38,15 +45,21 @@ function isLoopbackListenHost(host: string): boolean {
 
 /**
  * Resolve the caller address. Never use Host / X-Forwarded-Host.
- * Prefer X-Real-IP (proxy-overwritten). For X-Forwarded-For, take the entry
- * TRUSTED_PROXY_HOPS from the right — the leftmost value is attacker-controlled
- * when clients send a forged header and the proxy only appends.
+ * Strategy is selected only via TRUST_PROXY_HEADER — not both at once.
  */
 function peerIp(request: Request): string | null {
   if (!TRUST_PROXY) return null;
 
-  const realIp = request.headers.get("x-real-ip")?.trim();
-  if (realIp) return realIp;
+  if (TRUST_PROXY_HEADER === "x-real-ip") {
+    return request.headers.get("x-real-ip")?.trim() || null;
+  }
+
+  if (TRUST_PROXY_HEADER !== "x-forwarded-for") {
+    console.error(
+      `Invalid TRUST_PROXY_HEADER=${JSON.stringify(TRUST_PROXY_HEADER)}; use "x-forwarded-for" or "x-real-ip"`,
+    );
+    return null;
+  }
 
   const xff = request.headers.get("x-forwarded-for");
   if (!xff) return null;
@@ -55,6 +68,8 @@ function peerIp(request: Request): string | null {
     .map((part) => part.trim())
     .filter(Boolean);
   if (parts.length < TRUSTED_PROXY_HOPS) return null;
+  // Rightmost trusted hop — leftmost is attacker-controlled when clients forge XFF
+  // and the proxy only appends.
   return parts[parts.length - TRUSTED_PROXY_HOPS] || null;
 }
 
@@ -62,10 +77,8 @@ function assertLocalDevOnly(request: Request): NextResponse | null {
   if (ALLOW_REMOTE_TOKEN) return null;
 
   // Host-header checks are intentionally not used here (spoofable).
-  if (process.env.NODE_ENV === "production") {
-    return new NextResponse("Token endpoint is local-dev only", { status: 403 });
-  }
-
+  // Production loopback (`npm start` with MOSS_LISTEN_HOST=127.0.0.1) is allowed;
+  // remote production still requires ALLOW_REMOTE_TOKEN=1.
   const ip = peerIp(request);
   if (ip !== null) {
     return isLoopbackIp(ip)
@@ -73,8 +86,8 @@ function assertLocalDevOnly(request: Request): NextResponse | null {
       : new NextResponse("Token endpoint is local-dev only", { status: 403 });
   }
 
-  // No verified peer IP (TRUST_PROXY unset). Allow only when the npm script
-  // marked this process as loopback-bound — never treat null IP as "safe" on LAN.
+  // No verified peer IP. Allow only when the npm script marked this process as
+  // loopback-bound (works for both `next dev` and production `next start`).
   if (!TRUST_PROXY && LISTEN_HOST && isLoopbackListenHost(LISTEN_HOST)) {
     return null;
   }
