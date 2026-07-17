@@ -93,13 +93,26 @@ jobs:
       - name: Tag release
         env:
           VERSION: ${{ env.VERSION }}
+          ALREADY_PUBLISHED: ${{ steps.published.outputs.exists }}
         run: |
           git fetch --tags --force
-          if git rev-parse "n8n-nodes-moss-v${VERSION}" >/dev/null 2>&1; then
-            echo "Tag n8n-nodes-moss-v${VERSION} already exists"
-          else
-            git config user.name "github-actions"
-            git config user.email "github-actions@users.noreply.github.com"
-            git tag "n8n-nodes-moss-v${VERSION}"
-            git push origin "n8n-nodes-moss-v${VERSION}"
+          TAG="n8n-nodes-moss-v${VERSION}"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists"
+            exit 0
           fi
+
+          if [[ "$ALREADY_PUBLISHED" == "true" ]]; then
+            echo "ERROR: n8n-nodes-moss@${VERSION} is already on npm, but git tag $TAG is missing."
+            echo "Refusing to tag the current checkout because it may not match the published artifact."
+            echo "Recover manually: identify the commit that produced the npm package, then:"
+            echo "  git tag $TAG <published-commit-sha>"
+            echo "  git push origin $TAG"
+            exit 1
+          fi
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"

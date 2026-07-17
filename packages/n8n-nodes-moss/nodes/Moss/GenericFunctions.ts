@@ -263,21 +263,34 @@ async function uploadWithRetries(uploadUrl: string, payload: ArrayBuffer): Promi
 				headers: { 'Content-Type': 'application/octet-stream' },
 				signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
 			});
+
+			// Drain/cancel the body so keep-alive sockets are released promptly.
+			await response.arrayBuffer().catch(() => undefined);
+
 			if (response.ok) return;
 
 			lastError = new Error(`Failed to upload Moss index payload (HTTP ${response.status})`);
-			if (response.status < 500) {
+			const retryableStatus = response.status === 429 || response.status >= 500;
+			if (!retryableStatus) {
 				throw lastError;
 			}
 		} catch (error) {
-			if (error instanceof Error && /HTTP [4]\d\d/.test(error.message)) {
+			if (
+				error instanceof Error &&
+				/HTTP [4]\d\d/.test(error.message) &&
+				!/HTTP 429/.test(error.message)
+			) {
 				throw error;
 			}
 			lastError =
 				error instanceof Error
 					? error
 					: new Error(`Failed to upload Moss index payload: ${String(error)}`);
-			if (!isRetryableTransportError(error) && !/HTTP 5\d\d/.test(lastError.message)) {
+			if (
+				!isRetryableTransportError(error) &&
+				!/HTTP 5\d\d/.test(lastError.message) &&
+				!/HTTP 429/.test(lastError.message)
+			) {
 				throw lastError;
 			}
 		}

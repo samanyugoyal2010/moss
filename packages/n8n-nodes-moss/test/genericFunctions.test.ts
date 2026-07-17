@@ -210,6 +210,55 @@ describe('HTTP helpers (mocked)', () => {
 		expect(fetchMock).toHaveBeenCalled();
 	});
 
+	it('createIndex retries upload on HTTP 429 then succeeds', async () => {
+		let uploadAttempts = 0;
+		const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+			if (url === CLOUD_MANAGE_URL) {
+				const body = JSON.parse(String(init?.body)) as { action: string };
+				if (body.action === 'initUpload') {
+					return new Response(
+						JSON.stringify({
+							jobId: 'job-429',
+							uploadUrl: 'https://upload.example/put-429',
+						}),
+						{ status: 200 },
+					);
+				}
+				if (body.action === 'startBuild') {
+					return new Response(JSON.stringify({ jobId: 'job-429', status: 'building' }), {
+						status: 200,
+					});
+				}
+				if (body.action === 'getJobStatus') {
+					return new Response(
+						JSON.stringify({ jobId: 'job-429', status: 'completed', progress: 100 }),
+						{ status: 200 },
+					);
+				}
+			}
+			if (url === 'https://upload.example/put-429') {
+				uploadAttempts += 1;
+				if (uploadAttempts === 1) {
+					return new Response('slow down', { status: 429 });
+				}
+				return new Response(null, { status: 200 });
+			}
+			return new Response(JSON.stringify({ error: `unexpected ${url}` }), { status: 500 });
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await createIndex(
+			credentials,
+			'faqs',
+			[{ id: '1', text: 'hello' }],
+			'moss-minilm',
+			{ waitForCompletion: true, maxWaitSeconds: 5 },
+		);
+
+		expect(uploadAttempts).toBe(2);
+		expect(result.status).toBe('completed');
+	});
+
 	it('addDocs returns job payload when wait is disabled', async () => {
 		const fetchMock = vi.fn(async () =>
 			new Response(JSON.stringify({ jobId: 'job-2', status: 'building' }), { status: 200 }),
