@@ -26,7 +26,8 @@ function isLoopbackIp(ip: string): boolean {
 }
 
 function isLoopbackListenHost(host: string): boolean {
-  const hostname = host.replace(/^\[|\]$/g, "").replace(/:\d+$/, "");
+  const bracketed = host.match(/^\[([^\]]+)\](?::\d+)?$/);
+  const hostname = bracketed?.[1] ?? host.replace(/^([^:]+):\d+$/, "$1");
   return (
     hostname === "127.0.0.1" ||
     hostname === "localhost" ||
