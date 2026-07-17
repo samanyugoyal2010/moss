@@ -75,7 +75,7 @@ function assertLocalDevOnly(request: Request): NextResponse | null {
 
   // No verified peer IP (TRUST_PROXY unset). Allow only when the npm script
   // marked this process as loopback-bound — never treat null IP as "safe" on LAN.
-  if (LISTEN_HOST && isLoopbackListenHost(LISTEN_HOST)) {
+  if (!TRUST_PROXY && LISTEN_HOST && isLoopbackListenHost(LISTEN_HOST)) {
     return null;
   }
 
