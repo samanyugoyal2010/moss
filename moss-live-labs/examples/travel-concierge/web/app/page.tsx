@@ -25,6 +25,9 @@ export default function Page() {
       setNeedsGate(true);
       throw new Error("gate");
     }
+    if (res.status === 429) {
+      throw new Error("rate-limit");
+    }
     if (!res.ok) throw new Error(await res.text());
     return (await res.json()) as Conn;
   }, []);
@@ -38,18 +41,31 @@ export default function Page() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ secret: gateSecret }),
         });
-        if (!gateRes.ok) {
+        if (gateRes.status === 401) {
           alert("Access code rejected.");
+          return;
+        }
+        if (gateRes.status === 429) {
+          alert("Too many attempts. Please wait and try again.");
+          return;
+        }
+        if (!gateRes.ok) {
+          alert("Could not unlock the demo. Please try again.");
           return;
         }
       }
       const next = await fetchToken();
+      setGateSecret("");
       setNeedsGate(false);
       setConn(next);
       setRoomLive(false);
     } catch (err) {
       if (err instanceof Error && err.message === "gate") {
         // Prompt for access code; do not alert.
+        return;
+      }
+      if (err instanceof Error && err.message === "rate-limit") {
+        alert("Too many requests. Please wait and try again.");
         return;
       }
       console.error("failed to get token", err);
@@ -113,21 +129,33 @@ export default function Page() {
               Ask about destinations from the catalog, tell it your budget, dates, and who&apos;s coming.
               Watch Moss pull from the pre-loaded catalog and your live conversation, together.
             </p>
-            {needsGate && (
-              <label className="gate">
-                <span>Access code</span>
-                <input
-                  type="password"
-                  autoComplete="off"
-                  value={gateSecret}
-                  onChange={(e) => setGateSecret(e.target.value)}
-                  placeholder="Enter APP_SECRET"
-                />
-              </label>
-            )}
-            <button className="btn" onClick={connect} disabled={connecting || (needsGate && !gateSecret)}>
-              {connecting ? "Connecting…" : needsGate ? "Unlock & start" : "Start planning"}
-            </button>
+            <form
+              className="connect-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void connect();
+              }}
+            >
+              {needsGate && (
+                <label className="gate">
+                  <span>Access code</span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={gateSecret}
+                    onChange={(e) => setGateSecret(e.target.value)}
+                    placeholder="Enter APP_SECRET"
+                  />
+                </label>
+              )}
+              <button
+                type="submit"
+                className="btn"
+                disabled={connecting || (needsGate && !gateSecret)}
+              >
+                {connecting ? "Connecting…" : needsGate ? "Unlock & start" : "Start planning"}
+              </button>
+            </form>
           </div>
         </main>
       )}

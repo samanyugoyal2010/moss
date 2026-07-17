@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { AccessToken, TrackSource, type VideoGrant } from "livekit-server-sdk";
 import { hasValidGateCookie } from "@/lib/gate";
+import { clientKey, rateLimit } from "@/lib/rate-limit";
 
 // Copy web/.env.local.example to web/.env.local to get the `livekit-server --dev` defaults.
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
@@ -16,6 +17,15 @@ function unauthorized() {
 
 export async function GET(request: Request) {
   try {
+    const ip = clientKey(request);
+    const limited = rateLimit(`token:${ip}`, { limit: 30, windowMs: 60_000 });
+    if (!limited.ok) {
+      return new NextResponse("Too many requests", {
+        status: 429,
+        headers: { "Retry-After": String(limited.retryAfterSec) },
+      });
+    }
+
     if (APP_SECRET) {
       if (!hasValidGateCookie(request.headers.get("cookie"), APP_SECRET)) {
         return unauthorized();

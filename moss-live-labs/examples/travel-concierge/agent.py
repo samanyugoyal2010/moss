@@ -121,6 +121,10 @@ class TravelConciergeAgent(Agent):
         self.session_index = session_index
         self.room = room
         self.turn = 0
+        # Monotonic schedule order so a slow older extract cannot overwrite a newer correction.
+        self._remember_seq = 0
+        self._category_seq: dict[str, int] = {}
+        self._remember_write_lock = asyncio.Lock()
         # In-flight remember tasks — waited on briefly next turn, never cancelled on timeout.
         self._remember_tasks: set[asyncio.Task] = set()
         # Last catalog snapshot so a post-remember republish can keep catalog hits.
@@ -163,7 +167,9 @@ class TravelConciergeAgent(Agent):
             )
 
     def _schedule_remember(self, query: str) -> None:
-        task = asyncio.create_task(self._remember_facts(query))
+        self._remember_seq += 1
+        seq = self._remember_seq
+        task = asyncio.create_task(self._remember_facts(query, seq))
         self._remember_tasks.add(task)
         task.add_done_callback(self._remember_tasks.discard)
 
@@ -248,31 +254,45 @@ class TravelConciergeAgent(Agent):
             logger.warning(f"Fact extraction failed: {e}")
             return []
 
-    async def _remember_facts(self, text: str) -> None:
+    async def _remember_facts(self, text: str, seq: int) -> None:
         facts = await self._extract_facts(text)
         stored = 0
-        for fact_id, fact_text in facts:
-            self.turn += 1
-            # Canonical categories upsert; miscellaneous facts get unique ids so they
-            # never overwrite each other across turns.
-            if fact_id in FACT_IDS:
-                doc_id = f"pref-{fact_id}"
-            else:
-                doc_id = f"pref-other-{self.turn}"
-            try:
-                await self.session_index.add_docs(
-                    [
-                        DocumentInfo(
-                            id=doc_id,
-                            text=fact_text,
-                            metadata={"role": "traveler", "category": fact_id},
+        # Serialize writes and skip stale category updates from slower older extracts.
+        async with self._remember_write_lock:
+            for fact_id, fact_text in facts:
+                self.turn += 1
+                if fact_id in FACT_IDS:
+                    last = self._category_seq.get(fact_id, 0)
+                    if seq < last:
+                        logger.debug(
+                            "Skipping stale preference [%s] from seq %d (latest %d)",
+                            fact_id,
+                            seq,
+                            last,
                         )
-                    ]
-                )
-                stored += 1
-                logger.debug("Remembered [%s]: %s", doc_id, fact_text)
-            except Exception as e:
-                logger.warning(f"Failed to store fact: {e}")
+                        continue
+                    self._category_seq[fact_id] = seq
+                    doc_id = f"pref-{fact_id}"
+                else:
+                    doc_id = f"pref-other-{self.turn}"
+                try:
+                    await self.session_index.add_docs(
+                        [
+                            DocumentInfo(
+                                id=doc_id,
+                                text=fact_text,
+                                metadata={
+                                    "role": "traveler",
+                                    "category": fact_id,
+                                    "seq": str(seq),
+                                },
+                            )
+                        ]
+                    )
+                    stored += 1
+                    logger.debug("Remembered [%s]: %s", doc_id, fact_text)
+                except Exception as e:
+                    logger.warning(f"Failed to store fact: {e}")
 
         logger.info("Stored %d preference(s) from turn", stored)
 

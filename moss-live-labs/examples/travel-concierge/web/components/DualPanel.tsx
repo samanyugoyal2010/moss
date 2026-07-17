@@ -10,7 +10,8 @@ const decoder = new TextDecoder();
 function isDoc(value: unknown): value is Doc {
   if (!value || typeof value !== "object") return false;
   const d = value as Record<string, unknown>;
-  const idOk = d.id === undefined || d.id === null || typeof d.id === "string" || typeof d.id === "number";
+  // Match Doc.id: string | undefined only (reject number/null to keep the type guard sound).
+  const idOk = d.id === undefined || typeof d.id === "string";
   return (
     idOk &&
     typeof d.text === "string" &&
@@ -20,10 +21,7 @@ function isDoc(value: unknown): value is Doc {
 }
 
 function normalizeDoc(d: Doc, index: number): Doc & { key: string } {
-  const key =
-    d.id === undefined || d.id === null || d.id === ""
-      ? `idx-${index}`
-      : String(d.id);
+  const key = d.id && d.id.length > 0 ? d.id : `idx-${index}`;
   return { ...d, id: key, key };
 }
 

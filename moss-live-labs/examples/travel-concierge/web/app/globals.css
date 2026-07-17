@@ -409,6 +409,12 @@ body {
   font-size: 13px;
   color: var(--muted);
 }
+.connect-form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
 .gate input {
   font-family: var(--font-sans);
   font-size: 15px;
