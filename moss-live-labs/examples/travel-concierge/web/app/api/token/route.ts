@@ -5,11 +5,22 @@ import { AccessToken, type VideoGrant } from "livekit-server-sdk";
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
 const API_KEY = process.env.LIVEKIT_API_KEY;
 const API_SECRET = process.env.LIVEKIT_API_SECRET;
+const APP_SECRET = process.env.APP_SECRET;
 
 export const revalidate = 0;
 
-export async function GET() {
+function unauthorized() {
+  return new NextResponse("Unauthorized", { status: 401 });
+}
+
+export async function GET(request: Request) {
   try {
+    if (APP_SECRET) {
+      const auth = request.headers.get("authorization") ?? "";
+      const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      if (token !== APP_SECRET) return unauthorized();
+    }
+
     if (!LIVEKIT_URL) throw new Error("LIVEKIT_URL is not defined");
     if (!API_KEY) throw new Error("LIVEKIT_API_KEY is not defined");
     if (!API_SECRET) throw new Error("LIVEKIT_API_SECRET is not defined");
@@ -33,7 +44,7 @@ export async function GET() {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
-    const msg = error instanceof Error ? error.message : "Unknown error";
-    return new NextResponse(msg, { status: 500 });
+    console.error("token mint failed", error);
+    return new NextResponse("Failed to create token", { status: 500 });
   }
 }

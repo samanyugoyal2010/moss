@@ -13,19 +13,23 @@ const STATE_LABEL: Record<string, string> = {
   speaking: "speaking",
   connecting: "connecting",
   initializing: "warming up",
+  idle: "idle",
+  failed: "failed",
+  "pre-connect-buffering": "connecting",
 };
 
 export function AgentSide() {
   const { state, audioTrack } = useVoiceAssistant();
-  const label = STATE_LABEL[state] ?? "idle";
+  const label = STATE_LABEL[state] ?? "…";
   const idle = !state || state === "disconnected" || state === "idle";
+  const failed = state === "failed";
 
   return (
     <div className="card agent">
       <div className="orb">
         <BarVisualizer state={state} barCount={7} trackRef={audioTrack} />
       </div>
-      <div className={`agent-state ${idle ? "idle" : ""}`}>{label}</div>
+      <div className={`agent-state ${idle ? "idle" : ""} ${failed ? "failed" : ""}`}>{label}</div>
       <Transcript />
       <VoiceAssistantControlBar />
     </div>

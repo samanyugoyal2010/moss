@@ -30,20 +30,29 @@ MOSS_PROJECT_KEY = os.getenv("MOSS_PROJECT_KEY")
 # Long-term, pre-loaded knowledge shared across every call.
 CATALOG_INDEX = os.getenv("TRAVEL_CATALOG_INDEX", "demo-travel-catalog")
 
+# Bound how long the next turn waits for the previous turn's fact write.
+REMEMBER_WAIT_TIMEOUT_S = 2.0
+# Session recall should cover all stored prefs for a short call.
+SESSION_TOP_K = 20
+
+FACT_IDS = ("budget", "dates", "party", "interests", "destination", "must_haves")
+
 # Turns the traveler's raw speech into clean, standalone facts before we store them.
 # Questions, recall requests, and small talk yield no facts, so they never hit the session.
 FACT_EXTRACT_PROMPT = """You pull durable traveler preferences out of one thing the traveler just said on a trip-planning call.
 
-Return JSON: {"facts": ["...", "..."]}.
+Return JSON: {"facts": [{"id": "...", "text": "..."}, ...]}.
 
-A fact is a short, standalone statement of something true about the traveler or their trip:
-party size, budget, dates, interests, must-haves, or destinations they like or dislike.
+Each fact has:
+- id: one of budget, dates, party, interests, destination, must_haves, or other-<n> for anything else
+- text: a short, standalone statement of something true about the traveler or their trip
 
 Rules:
 - Only include preferences actually stated in this utterance.
-- Split multiple preferences into separate facts.
+- Split multiple preferences into separate facts with distinct ids.
+- Use the same id when correcting a preference (e.g. a new budget replaces the old one).
 - Drop filler and normalize (e.g. "our budget's around, uh, twenty five hundred a person" -> "Budget is about $2,500 per person").
-- Keep each fact under about 8 words.
+- Keep each fact text under about 8 words.
 - Return {"facts": []} for questions, recall requests, or small talk (e.g. "what did I say my budget was?", "so where should we go?")."""
 
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +64,42 @@ def _docs(result):
         {"id": getattr(d, "id", None), "text": d.text, "score": float(getattr(d, "score", 0.0))}
         for d in (result.docs if result and result.docs else [])
     ]
+
+
+def _normalize_facts(raw) -> list[tuple[str, str]]:
+    """Validate extractor output into (id, text) pairs. Never iterate a bare string."""
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [("other-0", text)] if text else []
+    if not isinstance(raw, list):
+        return []
+
+    out: list[tuple[str, str]] = []
+    other_n = 0
+    for item in raw:
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                continue
+            out.append((f"other-{other_n}", text))
+            other_n += 1
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        fact_id = item.get("id")
+        if not isinstance(fact_id, str) or not fact_id.strip():
+            fact_id = f"other-{other_n}"
+            other_n += 1
+        else:
+            fact_id = fact_id.strip()
+            if fact_id not in FACT_IDS and not fact_id.startswith("other-"):
+                fact_id = f"other-{other_n}"
+                other_n += 1
+        out.append((fact_id, text.strip()))
+    return out
 
 
 class TravelConciergeAgent(Agent):
@@ -80,6 +125,10 @@ class TravelConciergeAgent(Agent):
         self.turn = 0
         # background task that stores the current turn's facts; awaited next turn
         self._pending_remember = None
+        # Last catalog snapshot so a post-remember republish can keep catalog hits.
+        self._last_catalog = None
+        self._last_catalog_ms = 0.0
+        self._last_query = ""
         # Small, fast model used only to distill the traveler's speech into facts.
         self._extractor = AsyncOpenAI()
 
@@ -98,25 +147,54 @@ class TravelConciergeAgent(Agent):
         except Exception as e:
             logger.warning(f"Failed to publish retrieval data: {e}")
 
-    async def on_user_turn_completed(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
-        query = new_message.text_content
-        logger.info(f"Traveler: {query}")
+    async def _await_pending_remember(self) -> None:
+        if self._pending_remember is None:
+            return
         try:
-            # 0. Make sure the previous turn's facts are stored before we recall,
-            #    so an immediate follow-up question sees them.
-            if self._pending_remember is not None:
+            await asyncio.wait_for(self._pending_remember, timeout=REMEMBER_WAIT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("Fact storage timed out; continuing without waiting")
+            self._pending_remember.cancel()
+            try:
                 await self._pending_remember
-                self._pending_remember = None
+            except (asyncio.CancelledError, Exception):
+                pass
+        except Exception as e:
+            logger.warning(f"Pending fact storage failed: {e}")
+        finally:
+            self._pending_remember = None
+
+    async def on_user_turn_completed(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
+        query = (new_message.text_content or "").strip()
+        if not query:
+            await super().on_user_turn_completed(turn_ctx, new_message)
+            return
+
+        logger.info("Traveler turn (%d chars)", len(query))
+        logger.debug("Traveler text: %s", query)
+
+        try:
+            # 0. Bound wait for previous turn's facts so a stalled extract cannot block voice.
+            await self._await_pending_remember()
 
             # 1. Recall prior turns from the live session (short-term memory).
             t = time.perf_counter()
-            session_results = await self.session_index.query(query, QueryOptions(top_k=3))
+            session_results = await self.session_index.query(query, QueryOptions(top_k=SESSION_TOP_K))
             session_ms = (time.perf_counter() - t) * 1000.0
 
-            # 2. Look up matching trips in the pre-loaded catalog (long-term knowledge).
+            # 2. Look up matching trips using the utterance plus recalled preferences.
+            preference_bits = [d.text for d in (session_results.docs or []) if getattr(d, "text", None)]
+            catalog_query = query
+            if preference_bits:
+                catalog_query = f"{query} {' '.join(preference_bits)}"
+
             t = time.perf_counter()
-            catalog_results = await self.moss.query(CATALOG_INDEX, query, QueryOptions(top_k=3))
+            catalog_results = await self.moss.query(CATALOG_INDEX, catalog_query, QueryOptions(top_k=3))
             catalog_ms = (time.perf_counter() - t) * 1000.0
+
+            self._last_query = query
+            self._last_catalog = catalog_results
+            self._last_catalog_ms = catalog_ms
 
             # 3. Show both in the UI.
             await self._publish(query, catalog_results, session_results, catalog_ms, session_ms)
@@ -124,22 +202,29 @@ class TravelConciergeAgent(Agent):
             # 4. Inject both into the model's context, clearly labeled.
             blocks = []
             if catalog_results.docs:
-                blocks.append("Trip options from our catalog:\n" + "\n".join(f"- {d.text}" for d in catalog_results.docs))
+                blocks.append(
+                    "Trip options from our catalog:\n"
+                    + "\n".join(f"- {d.text}" for d in catalog_results.docs)
+                )
             if session_results.docs:
-                blocks.append("Facts the traveler shared earlier in this call:\n" + "\n".join(f"- {d.text}" for d in session_results.docs))
+                blocks.append(
+                    "Facts the traveler shared earlier in this call:\n"
+                    + "\n".join(f"- {d.text}" for d in session_results.docs)
+                )
             if blocks:
-                turn_ctx.add_message(role="system", content="\n\n".join(blocks) + "\n\nUse this to help the traveler.")
-
-            # 5. Distill this turn into facts and store only those in the live session, in the
-            #    background so it never delays the reply. Awaited at the top of the next turn
-            #    (step 0) so recall always sees it. Questions/recall add nothing.
-            self._pending_remember = asyncio.create_task(self._remember_facts(query))
+                turn_ctx.add_message(
+                    role="system",
+                    content="\n\n".join(blocks) + "\n\nUse this to help the traveler.",
+                )
         except Exception as e:
             logger.error(f"Moss lookup failed: {e}", exc_info=True)
+        finally:
+            # Distill this turn independently of retrieval success so prefs are not dropped.
+            self._pending_remember = asyncio.create_task(self._remember_facts(query))
 
         await super().on_user_turn_completed(turn_ctx, new_message)
 
-    async def _extract_facts(self, text: str) -> list[str]:
+    async def _extract_facts(self, text: str) -> list[tuple[str, str]]:
         """Pull clean, standalone facts out of one traveler utterance. [] if it states none."""
         try:
             resp = await self._extractor.chat.completions.create(
@@ -152,21 +237,52 @@ class TravelConciergeAgent(Agent):
                 ],
             )
             data = json.loads(resp.choices[0].message.content or "{}")
-            return [f.strip() for f in data.get("facts", []) if isinstance(f, str) and f.strip()]
+            return _normalize_facts(data.get("facts", []))
         except Exception as e:
             logger.warning(f"Fact extraction failed: {e}")
             return []
 
     async def _remember_facts(self, text: str) -> None:
-        for fact in await self._extract_facts(text):
+        facts = await self._extract_facts(text)
+        stored = 0
+        for fact_id, fact_text in facts:
             self.turn += 1
             try:
+                # Same id upserts — corrections replace stale preferences.
                 await self.session_index.add_docs(
-                    [DocumentInfo(id=f"fact-{self.turn}", text=fact, metadata={"role": "traveler"})]
+                    [
+                        DocumentInfo(
+                            id=f"pref-{fact_id}",
+                            text=fact_text,
+                            metadata={"role": "traveler", "category": fact_id},
+                        )
+                    ]
                 )
-                logger.info(f"Remembered: {fact}")
+                stored += 1
+                logger.debug("Remembered [%s]: %s", fact_id, fact_text)
             except Exception as e:
                 logger.warning(f"Failed to store fact: {e}")
+
+        logger.info("Stored %d preference(s) from turn", stored)
+
+        # Refresh the live panel so facts from this utterance appear without waiting
+        # for the next traveler turn.
+        if stored:
+            try:
+                t = time.perf_counter()
+                session_results = await self.session_index.query(
+                    self._last_query or text, QueryOptions(top_k=SESSION_TOP_K)
+                )
+                session_ms = (time.perf_counter() - t) * 1000.0
+                await self._publish(
+                    self._last_query or text,
+                    self._last_catalog,
+                    session_results,
+                    self._last_catalog_ms,
+                    session_ms,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to republish session after remember: {e}")
 
 
 async def entrypoint(ctx: JobContext):

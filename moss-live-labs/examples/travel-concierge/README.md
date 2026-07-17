@@ -20,29 +20,33 @@ Browser (web/)  ⟷  LiveKit room  ⟷  agent.py (STT → LLM → TTS)  ⟷  Mos
 ```bash
 uv sync
 cp .env.example .env          # fill in Moss + provider keys
-python agent.py download-files
+uv run python agent.py download-files
 ```
 
 ## 1. Seed the catalog (the cloud index)
 ```bash
-python seed_index.py
+uv run python seed_index.py
 ```
 The live session is built at runtime by the agent — nothing to seed there.
 
 ## 2. Run (three terminals)
 ```bash
 livekit-server --dev
-python agent.py dev
+uv run python agent.py dev
 cd web && npm install && cp .env.local.example .env.local && npm run dev   # localhost:3000
 ```
 
 Click **Start planning**, then talk: tell it your budget, dates, and who's coming, ask it
 to recall them, and ask for a recommendation.
 
+For a public deploy, set `APP_SECRET` in `web/.env.local` (and the matching
+`NEXT_PUBLIC_APP_SECRET`) so `/api/token` is not open to anonymous callers. Leave both
+unset for open local demos.
+
 ## How it works
 Per turn, `agent.py`:
 1. queries the **live session** (recall what you've said),
-2. queries the **pre-loaded catalog** (matching trips),
+2. queries the **pre-loaded catalog** (matching trips, using recalled preferences),
 3. injects both into the model, then
 4. **distills your turn into facts and stores only those** in the session, so later turns
    recall clean preferences — not questions or filler.

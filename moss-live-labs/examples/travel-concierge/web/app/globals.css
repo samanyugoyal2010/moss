@@ -4,12 +4,12 @@
   --card: #ffffff;
   --text: #1c1b19;
   --muted: #726f66;
-  --faint: #a8a498;
+  --faint: #706e67;
   --line: #e7e2d8;
   --cloud: #0f766e; /* pre-loaded catalog (long-term) */
   --cloud-soft: #0f766e18;
-  --live: #c2691c; /* live session (this call) */
-  --live-soft: #c2691c18;
+  --live: #9a5214; /* live session (this call) */
+  --live-soft: #9a521418;
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
@@ -130,6 +130,9 @@ body {
 }
 .agent-state.idle {
   color: var(--faint);
+}
+.agent-state.failed {
+  color: #a33b2a;
 }
 .transcript {
   width: 100%;

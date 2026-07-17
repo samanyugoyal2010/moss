@@ -1,14 +1,14 @@
 # Demo Script — Travel Concierge (cloud catalog + live session)
 
 ~90s. Shows Moss answering from **two indexes in one call**: a pre-loaded catalog and a
-live session that remembers what you say. Watch both panels on the right.
+live session that remembers trip preferences you mention. Watch both panels on the right.
 
 ## Before you record
-- [ ] `python seed_index.py` (seeds the catalog) · `python agent.py dev` · `livekit-server --dev` · web at localhost:3000
+- [ ] `uv run python seed_index.py` (seeds the catalog) · `uv run python agent.py dev` · `livekit-server --dev` · web at localhost:3000
 
 ## 1 · Frame it (0:00–0:12)
 > "This concierge knows a catalog of trips — that's loaded ahead of time. But it also
-> remembers everything I say on the call. Two Moss indexes, live, side by side. Watch."
+> remembers the trip preferences I mention on the call. Two Moss indexes, live, side by side. Watch."
 
 **[Click Start planning. The agent greets you.]**
 

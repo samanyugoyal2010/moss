@@ -3,7 +3,7 @@
 The live session (what the traveler says on the call) is built at runtime by the
 agent — it is NOT seeded here. Run once before starting the agent:
 
-    python seed_index.py
+    uv run python seed_index.py
 """
 
 import asyncio
@@ -32,7 +32,7 @@ async def main() -> None:
             "Missing MOSS_PROJECT_ID / MOSS_PROJECT_KEY. Copy .env.example to .env and fill them in."
         )
 
-    trips = json.loads(CATALOG_PATH.read_text())
+    trips = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
     docs = [DocumentInfo(id=t["id"], text=t["text"]) for t in trips]
     client = MossClient(project_id=MOSS_PROJECT_ID, project_key=MOSS_PROJECT_KEY)
     logger.info(f"Creating catalog index '{CATALOG_INDEX}' with {len(docs)} destinations...")

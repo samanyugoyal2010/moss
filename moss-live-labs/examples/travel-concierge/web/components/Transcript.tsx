@@ -30,18 +30,24 @@ export function Transcript() {
 
   const ordered = Object.values(turns).filter((t) => t.text.trim().length > 0);
 
-  if (ordered.length === 0) {
-    return <div className="transcript transcript-empty">Say hello to start the conversation.</div>;
-  }
-
   return (
-    <div className="transcript">
-      {ordered.map((turn) => (
-        <div className={`turn ${turn.isUser ? "user" : "agent"}`} key={turn.id}>
-          <span className="who">{turn.isUser ? "You" : "Agent"}</span>
-          <span className="text">{turn.text}</span>
-        </div>
-      ))}
+    <div
+      className={`transcript${ordered.length === 0 ? " transcript-empty" : ""}`}
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions"
+      aria-label="Conversation transcript"
+    >
+      {ordered.length === 0 ? (
+        "Say hello to start the conversation."
+      ) : (
+        ordered.map((turn) => (
+          <div className={`turn ${turn.isUser ? "user" : "agent"}`} key={turn.id}>
+            <span className="who">{turn.isUser ? "You" : "Agent"}</span>
+            <span className="text">{turn.text}</span>
+          </div>
+        ))
+      )}
     </div>
   );
 }

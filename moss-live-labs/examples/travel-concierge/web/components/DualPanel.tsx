@@ -7,6 +7,28 @@ import type { Doc, RetrievalPayload } from "@/lib/types";
 // Reused across data-channel messages to avoid allocating a decoder per update.
 const decoder = new TextDecoder();
 
+function isDoc(value: unknown): value is Doc {
+  if (!value || typeof value !== "object") return false;
+  const d = value as Record<string, unknown>;
+  return typeof d.text === "string" && typeof d.score === "number" && Number.isFinite(d.score);
+}
+
+function isRetrievalPayload(value: unknown): value is RetrievalPayload {
+  if (!value || typeof value !== "object") return false;
+  const p = value as Record<string, unknown>;
+  return (
+    typeof p.query === "string" &&
+    Array.isArray(p.catalog) &&
+    p.catalog.every(isDoc) &&
+    Array.isArray(p.session) &&
+    p.session.every(isDoc) &&
+    typeof p.catalog_ms === "number" &&
+    Number.isFinite(p.catalog_ms) &&
+    typeof p.session_ms === "number" &&
+    Number.isFinite(p.session_ms)
+  );
+}
+
 function Hits({ docs, empty }: { docs: Doc[]; empty: string }) {
   if (!docs.length) return <div className="panel-empty">{empty}</div>;
   return (
@@ -38,7 +60,12 @@ export function DualPanel() {
     "moss.retrieval",
     useCallback((msg: { payload: Uint8Array }) => {
       try {
-        setData(JSON.parse(decoder.decode(msg.payload)) as RetrievalPayload);
+        const parsed: unknown = JSON.parse(decoder.decode(msg.payload));
+        if (!isRetrievalPayload(parsed)) {
+          console.error("ignored malformed moss.retrieval payload", parsed);
+          return;
+        }
+        setData(parsed);
       } catch (err) {
         console.error("failed to parse moss.retrieval payload", err);
       }
