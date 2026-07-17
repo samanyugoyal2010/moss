@@ -196,42 +196,14 @@ class MossSemanticRetrievalAgent(Agent):
 
         logger.info(f"User asked: {user_query}")
         self._turn_busy = True
+        region = self.region
 
         try:
-            # Re-query / re-publish until the region is still current after every await,
-            # so a mid-turn picker change cannot leave the spoken answer on the old region.
-            results = None
-            took_ms = 0.0
-            region = self.region
-            for _attempt in range(4):
-                region = self.region
-                results, took_ms = await self._query_moss(user_query, region)
-                if self.region != region:
-                    logger.info(
-                        "Region changed during retrieval (%s → %s); retrying",
-                        region,
-                        self.region,
-                    )
-                    continue
+            # Snapshot region for this turn. Mid-turn picker changes are deferred via
+            # apply_region() until the reply finishes, so a single query/publish is enough.
+            results, took_ms = await self._query_moss(user_query, region)
+            await self._publish_retrieval(user_query, results, took_ms, region)
 
-                await self._publish_retrieval(user_query, results, took_ms, region)
-                if self.region != region:
-                    logger.info(
-                        "Region changed during retrieval publish (%s → %s); retrying",
-                        region,
-                        self.region,
-                    )
-                    continue
-                break
-            else:
-                # Exhausted retries while the picker kept moving — stay grounded.
-                region = self.region
-                await self._publish_retrieval(user_query, None, 0.0, region)
-                turn_ctx.add_message(role="system", content=NO_MATCH_CONTEXT)
-                await super().on_user_turn_completed(turn_ctx, new_message)
-                return
-
-            # 3. Context Injection (region still matches after query + publish)
             if results and results.docs:
                 context_str = "\n".join([f"- {d.text}" for d in results.docs])
                 injection = (
@@ -248,10 +220,10 @@ class MossSemanticRetrievalAgent(Agent):
         except Exception as e:
             logger.error(f"Moss search failed: {e}", exc_info=True)
             # Clear stale panel docs and keep the reply grounded when retrieval fails.
-            await self._publish_retrieval(user_query, None, 0.0, self.region)
+            await self._publish_retrieval(user_query, None, 0.0, region)
             turn_ctx.add_message(role="system", content=NO_MATCH_CONTEXT)
 
-        # 3. Proceed with standard generation (_turn_busy cleared when agent returns to listening)
+        # Proceed with standard generation (_turn_busy cleared when agent returns to listening)
         await super().on_user_turn_completed(turn_ctx, new_message)
 
 
@@ -265,7 +237,6 @@ async def entrypoint(ctx: JobContext):
     # to the topic (browser often publishes as soon as the agent participant appears).
     pending_region = {"value": REGION}
     agent_holder: dict[str, MossSemanticRetrievalAgent | None] = {"agent": None}
-    session_holder: dict[str, AgentSession | None] = {"session": None}
 
     @ctx.room.on("data_received")
     def _on_data(pkt: rtc.DataPacket):
@@ -309,7 +280,6 @@ async def entrypoint(ctx: JobContext):
         vad=silero.VAD.load(),
         turn_handling={"interruption": {"mode": "vad"}},
     )
-    session_holder["session"] = session
 
     agent = MossSemanticRetrievalAgent(moss_client, ctx.room, region=pending_region["value"])
     agent._session = session  # used by apply_region to detect in-flight replies
