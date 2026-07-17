@@ -66,11 +66,29 @@ INTERVIEW_TRACKS: dict[str, dict[str, str]] = {
 DEFAULT_TRACK_ID = "system-design"
 
 
+def _canonical_track_key(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    key = raw.strip().lower().replace("_", "-")
+    return key or None
+
+
 def normalize_track_id(raw: str | None) -> str:
-    key = (raw or DEFAULT_TRACK_ID).strip().lower().replace("_", "-")
-    if key in INTERVIEW_TRACKS:
-        return key
-    return DEFAULT_TRACK_ID
+    """Lenient normalization: missing/empty/unknown → default track."""
+    key = _canonical_track_key(raw)
+    if key is None or key not in INTERVIEW_TRACKS:
+        return DEFAULT_TRACK_ID
+    return key
+
+
+def resolve_track_id_for_offer(raw: str | None) -> str:
+    """Strict resolution for /api/offer: missing/empty → default; unknown → error."""
+    key = _canonical_track_key(raw)
+    if key is None:
+        return DEFAULT_TRACK_ID
+    if key not in INTERVIEW_TRACKS:
+        raise ValueError(f"Unknown interview track: {key}")
+    return key
 
 
 def track_index_name(track_id: str) -> str:

@@ -68,6 +68,7 @@ from tracks import (
     INTERVIEW_TRACKS,
     all_index_names,
     normalize_track_id,
+    resolve_track_id_for_offer,
     track_index_name,
 )
 
@@ -89,8 +90,7 @@ COACH_BEHAVIOR = (
     "When the candidate finishes a substantive answer: speak your short follow-up question "
     "in the same turn, and also call grade_candidate_answer with their answer text. "
     "Skip the tool for greetings, topic picks, or one-word clarifications. "
-    "Never speak scores, grades, or improvement tips aloud — the assist panel shows those. "
-    "Ignore tool/grade system notes; they are only for the assist panel."
+    "Never speak scores, grades, or improvement tips aloud — the assist panel shows those."
 )
 
 
@@ -192,6 +192,9 @@ class MossContextInjector(FrameProcessor):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Moss query failed: {exc}")
+            self.last_rubric_id = None
+            self.last_rubric_text = None
+            _upsert_system_message(frame.context, self._system_prompt)
             return
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -704,6 +707,11 @@ async def run_interview_bot(
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport: SmallWebRTCTransport, client: Any) -> None:
             logger.info("Client disconnected; ending pipeline.")
+            grade_tasks = list(assist_state._grade_tasks)
+            for task in grade_tasks:
+                task.cancel()
+            if grade_tasks:
+                await asyncio.gather(*grade_tasks, return_exceptions=True)
             await worker.cancel()
 
         runner = WorkerRunner()
@@ -818,7 +826,10 @@ async def list_tracks() -> dict[str, Any]:
 
 @app.post("/api/offer")
 async def offer(request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    track_id = normalize_track_id(request.query_params.get("topic"))
+    try:
+        track_id = resolve_track_id_for_offer(request.query_params.get("topic"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not moss_indexes_ready.get(track_id):
         index_name = track_index_name(track_id)
         raise HTTPException(
@@ -846,7 +857,10 @@ async def offer(request: Request, background_tasks: BackgroundTasks) -> dict[str
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to handle WebRTC offer")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to handle WebRTC offer",
+        ) from exc
 
     return answer
 
@@ -863,7 +877,10 @@ async def offer_patch(request: Request) -> dict[str, str]:
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to patch WebRTC ICE candidates")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to patch WebRTC ICE candidates",
+        ) from exc
     return {"status": "ok"}
 
 

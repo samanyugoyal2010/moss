@@ -22,7 +22,7 @@
   {
     "id": "training-vs-inference",
     "title": "Training vs Inference",
-    "text": "Training vs Inference grading rubric: Expect differences in compute pattern (batch GPU training vs low-latency serving), batching, quantization/distillation for deploy, and train–serve skew. Probe versioning of models and features, warm starts, and rollback. Strong answers cover monitoring prediction drift and when to retrain. Deduct for treating training and serving as the same pipeline or ignoring latency/cost at inference.",
+    "text": "Training vs Inference grading rubric: Expect candidates to contrast training (forward+backward passes, optimizer steps, checkpointing) with inference (forward-only scoring). Hardware, batching, latency, and throughput trade-offs are workload-dependent—not a single 'batch GPU training vs low-latency serving' template. Probe quantization/distillation for deploy, train–serve skew, model/feature versioning, warm starts, and rollback. Strong answers cover monitoring prediction drift and when to retrain. Deduct for treating training and serving as the same pipeline or ignoring how inference constraints differ from optimization-time compute.",
     "metadata": {
       "topic": "Training vs Inference",
       "difficulty": "hard",

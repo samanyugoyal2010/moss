@@ -40,18 +40,47 @@ def _documents_from_json(path: Path) -> list[DocumentInfo]:
     raw: Any = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         raise ValueError(f"JSON source must be a list of documents: {path}")
+    if not raw:
+        raise ValueError(f"JSON source has no documents: {path}")
 
     documents: list[DocumentInfo] = []
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
             raise ValueError(f"Document at index {i} must be an object")
-        doc_id = str(item.get("id") or f"doc-{i}")
-        title = str(item.get("title") or "").strip()
-        text = str(item.get("text") or "").strip()
+        raw_id = item.get("id")
+        doc_id = raw_id if isinstance(raw_id, str) and raw_id.strip() else f"doc-{i}"
+        if "text" not in item:
+            raise ValueError(f"Document {doc_id} is missing required field 'text'")
+        if not isinstance(item["text"], str):
+            raise ValueError(
+                f"Document {doc_id} field 'text' must be a string, "
+                f"got {type(item['text']).__name__}"
+            )
+        title = item.get("title")
+        if title is not None and not isinstance(title, str):
+            raise ValueError(
+                f"Document {doc_id} field 'title' must be a string, "
+                f"got {type(title).__name__}"
+            )
+        title = (title or "").strip()
+        text = item["text"].strip()
         if not text:
             raise ValueError(f"Document {doc_id} has empty text")
         body = f"{title}\n\n{text}".strip() if title else text
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        metadata_raw = item.get("metadata")
+        if metadata_raw is None:
+            metadata: dict[str, str] = {}
+        elif not isinstance(metadata_raw, dict):
+            raise ValueError(f"Document {doc_id} metadata must be an object")
+        else:
+            metadata = {}
+            for key, value in metadata_raw.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    raise ValueError(
+                        f"Document {doc_id} metadata must be Dict[str, str]; "
+                        f"invalid entry {key!r}: {type(value).__name__}"
+                    )
+                metadata[key] = value
         if title and "topic" not in metadata:
             metadata = {**metadata, "topic": title}
         documents.append(DocumentInfo(id=doc_id, text=body, metadata=metadata))
@@ -90,6 +119,18 @@ def load_documents(source: Path) -> list[DocumentInfo]:
     raise ValueError(f"Unsupported source (use .json or a directory of .md): {source}")
 
 
+def _is_index_conflict_error(exc: BaseException) -> bool:
+    """True only for Moss duplicate-index conflicts; not auth/transport failures."""
+    for attr in ("status_code", "status", "code"):
+        val = getattr(exc, attr, None)
+        if val == 409:
+            return True
+    msg = str(exc).lower()
+    if "already exists" in msg and "index" in msg:
+        return True
+    return msg.strip() == "index already exists"
+
+
 async def _delete_index_if_exists(client: MossClient, index_name: str) -> None:
     delete = getattr(client, "delete_index", None)
     if callable(delete):
@@ -105,7 +146,7 @@ async def ingest_index(
     *,
     index_name: str,
     source: Path,
-    sample_query: str,
+    sample_query: str | None,
     recreate: bool,
 ) -> None:
     documents = load_documents(source)
@@ -119,8 +160,7 @@ async def ingest_index(
         await client.create_index(index_name, documents, DEFAULT_MODEL)
         print(f"Created index '{index_name}' with model '{DEFAULT_MODEL}'.")
     except Exception as exc:  # noqa: BLE001
-        msg = str(exc).lower()
-        if "exist" in msg or "already" in msg:
+        if _is_index_conflict_error(exc):
             print(
                 f"Index '{index_name}' already exists. "
                 "Re-run with --recreate to delete and rebuild, or load as-is.",
@@ -133,6 +173,10 @@ async def ingest_index(
 
     await client.load_index(index_name)
     print(f"Loaded index '{index_name}' into the local Moss runtime.")
+
+    if not sample_query:
+        print("Skipping sample query (pass --sample-query to run one).")
+        return
 
     results = await client.query(
         index_name,
@@ -166,7 +210,13 @@ async def ingest_tracks(track_ids: list[str], *, recreate: bool) -> None:
         )
 
 
-async def ingest_source(source: Path, *, index_name: str, sample_query: str, recreate: bool) -> None:
+async def ingest_source(
+    source: Path,
+    *,
+    index_name: str,
+    sample_query: str | None,
+    recreate: bool,
+) -> None:
     project_id, project_key = _require_credentials()
     client = MossClient(project_id, project_key)
     await ingest_index(
@@ -205,6 +255,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Delete the index if it exists, then create it fresh.",
     )
+    parser.add_argument(
+        "--sample-query",
+        default=None,
+        help=(
+            "Query to run after load. Built-in tracks use each track's default; "
+            "with --source, omit to skip the sample query."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -215,7 +273,7 @@ def main() -> None:
         if args.source is not None:
             track = INTERVIEW_TRACKS[DEFAULT_TRACK_ID]
             index_name = args.index_name or track["index_name"]
-            sample_query = track["sample_query"]
+            sample_query = args.sample_query
             asyncio.run(
                 ingest_source(
                     args.source.resolve(),

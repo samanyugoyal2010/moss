@@ -12,7 +12,7 @@
   {
     "id": "tool-calling",
     "title": "Tool Calling",
-    "text": "Tool Calling grading rubric: Expect clear tool schemas (name, args, side-effect flags), validation of model-produced arguments, idempotency for mutate tools, and allowlists vs open function registries. Strong answers discuss parallel vs sequential tools, human-in-the-loop for irreversible actions, and how tool errors are fed back into the next turn. Probe prompt injection via tool results and least-privilege credentials. Deduct for only describing JSON function calling without safety or reliability concerns.",
+    "text": "Tool Calling grading rubric: Expect clear tool schemas (name, args, side-effect flags), validation of model-produced arguments, idempotency for mutating tools (state-changing tools), and allowlists vs open function registries. Strong answers discuss parallel vs sequential tools, human-in-the-loop for irreversible actions, and how tool errors are fed back into the next turn. Probe prompt injection via tool results and least-privilege credentials. Deduct for only describing JSON function calling without safety or reliability concerns.",
     "metadata": {
       "topic": "Tool Calling",
       "difficulty": "medium",

@@ -6,13 +6,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 type SessionState = "idle" | "connecting" | "active";
 
-type InterviewTrackId =
-  | "system-design"
-  | "agent-native-infrastructure"
-  | "machine-learning-concepts";
-
 type InterviewTrack = {
-  id: InterviewTrackId;
+  id: string;
   label: string;
   blurb: string;
 };
@@ -31,6 +26,14 @@ type AssistPanelState = {
   grading: boolean;
   gradingTurnId: number | null;
   feedback: GradeFeedback | null;
+};
+
+type HealthBody = {
+  ok?: boolean;
+  moss_ready?: boolean;
+  grader_worker?: boolean;
+  ollama_error?: string | null;
+  moss_indexes?: Record<string, { index_name?: string; ready?: boolean }>;
 };
 
 const EMPTY_ASSIST: AssistPanelState = {
@@ -60,6 +63,7 @@ const INTERVIEW_TRACKS: InterviewTrack[] = [
 ];
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+const CONNECT_TIMEOUT_MS = 30_000;
 
 function parseDataPayload(data: unknown): Record<string, unknown> | null {
   try {
@@ -89,6 +93,16 @@ function extractQuestionFromBotText(text: string): string {
   return (questions.at(-1) ?? parts.at(-1) ?? cleaned).trim();
 }
 
+function mapApiTracks(
+  apiTracks: Array<{ id: string; label: string }>,
+): InterviewTrack[] {
+  return apiTracks.map((track) => ({
+    id: track.id,
+    label: track.label,
+    blurb: INTERVIEW_TRACKS.find((t) => t.id === track.id)?.blurb ?? "",
+  }));
+}
+
 export default function HomePage() {
   const [session, setSession] = useState<SessionState>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -99,12 +113,33 @@ export default function HomePage() {
   const [localLevel, setLocalLevel] = useState(0);
   const [remoteLevel, setRemoteLevel] = useState(0);
   const [assist, setAssist] = useState<AssistPanelState>(EMPTY_ASSIST);
-  const [selectedTrack, setSelectedTrack] = useState<InterviewTrackId | null>(null);
+  const [tracks, setTracks] = useState<InterviewTrack[]>(INTERVIEW_TRACKS);
+  const [selectedTrack, setSelectedTrack] = useState<string | null>(null);
   const [activeTrackLabel, setActiveTrackLabel] = useState<string | null>(null);
 
   const clientRef = useRef<PipecatClient | null>(null);
   const botAudioRef = useRef<HTMLAudioElement | null>(null);
   const botTranscriptBuf = useRef("");
+  const connectAbortRef = useRef<AbortController | null>(null);
+  const userCancelledRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/tracks`);
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { tracks?: Array<{ id: string; label: string }> };
+        if (!Array.isArray(data.tracks) || data.tracks.length === 0 || cancelled) return;
+        setTracks(mapApiTracks(data.tracks));
+      } catch {
+        // Keep hardcoded INTERVIEW_TRACKS fallback.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleServerMessage = useCallback((raw: unknown) => {
     const msg = parseDataPayload(raw);
@@ -198,14 +233,18 @@ export default function HomePage() {
     });
   }, []);
 
-  const endInterview = useCallback(async () => {
-    const client = clientRef.current;
-    clientRef.current = null;
-    setSession("idle");
+  const resetTalkState = useCallback(() => {
     setAiTalking(false);
     setUserTalking(false);
     setLocalLevel(0);
     setRemoteLevel(0);
+  }, []);
+
+  const endInterview = useCallback(async () => {
+    const client = clientRef.current;
+    clientRef.current = null;
+    setSession("idle");
+    resetTalkState();
     setAssist(EMPTY_ASSIST);
     setActiveTrackLabel(null);
     botTranscriptBuf.current = "";
@@ -220,28 +259,59 @@ export default function HomePage() {
         // Best-effort disconnect
       }
     }
-  }, []);
+  }, [resetTalkState]);
 
-  const startInterview = useCallback(async (trackId: InterviewTrackId) => {
-    setError(null);
-    setSession("connecting");
-    setInterruptCount(0);
-    setLocalLevel(0);
-    setRemoteLevel(0);
-    setAssist(EMPTY_ASSIST);
-    setActiveTrackLabel(
-      INTERVIEW_TRACKS.find((t) => t.id === trackId)?.label ?? trackId,
-    );
+  const cancelConnecting = useCallback(async () => {
+    userCancelledRef.current = true;
+    connectAbortRef.current?.abort();
+    const client = clientRef.current;
+    clientRef.current = null;
+    setSession("idle");
+    resetTalkState();
+    setActiveTrackLabel(null);
     botTranscriptBuf.current = "";
+    if (botAudioRef.current) {
+      botAudioRef.current.pause();
+      botAudioRef.current.srcObject = null;
+    }
+    if (client) {
+      try {
+        await client.disconnect();
+      } catch {
+        // Best-effort disconnect
+      }
+    }
+  }, [resetTalkState]);
 
-    try {
-      const health = await fetch(`${BACKEND_URL}/health`);
-      if (health.ok) {
-        const body = (await health.json()) as {
-          moss_ready?: boolean;
-          grader_worker?: boolean;
-          moss_indexes?: Record<string, { index_name?: string; ready?: boolean }>;
-        };
+  const startInterview = useCallback(
+    async (trackId: string) => {
+      setError(null);
+      userCancelledRef.current = false;
+      setSession("connecting");
+      setInterruptCount(0);
+      resetTalkState();
+      setAssist(EMPTY_ASSIST);
+      setActiveTrackLabel(tracks.find((t) => t.id === trackId)?.label ?? trackId);
+      botTranscriptBuf.current = "";
+
+      const abort = new AbortController();
+      connectAbortRef.current = abort;
+      const timeoutId = window.setTimeout(() => {
+        abort.abort(new DOMException("Connection timed out", "AbortError"));
+      }, CONNECT_TIMEOUT_MS);
+
+      let client: PipecatClient | null = null;
+
+      try {
+        const health = await fetch(`${BACKEND_URL}/health`, { signal: abort.signal });
+        if (!health.ok) {
+          throw new Error(`Backend health check failed (${health.status})`);
+        }
+        const body = (await health.json()) as HealthBody;
+        if (body.ok === false) {
+          const ollamaHint = body.ollama_error ? ` Ollama: ${body.ollama_error}` : "";
+          throw new Error(`Backend is not ready.${ollamaHint}`);
+        }
         if (body.moss_ready === false) {
           throw new Error(
             "Moss indexes not loaded. Run ingest_knowledge.py and restart the backend.",
@@ -259,103 +329,173 @@ export default function HomePage() {
             "Grader worker is missing on the backend (grader_worker.py).",
           );
         }
-      }
 
-      const client = new PipecatClient({
-        transport: new SmallWebRTCTransport({
-          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-          waitForICEGathering: true,
-        }),
-        enableCam: false,
-        enableMic: true,
-        callbacks: {
-          onConnected: () => setSession("active"),
-          onBotReady: () => setSession("active"),
-          onDisconnected: () => {
-            setSession("idle");
+        if (abort.signal.aborted) return;
+
+        client = new PipecatClient({
+          transport: new SmallWebRTCTransport({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+            waitForICEGathering: true,
+          }),
+          enableCam: false,
+          enableMic: true,
+          callbacks: {
+            onConnected: () => {
+              if (clientRef.current !== client) return;
+              setSession("active");
+            },
+            onBotReady: () => {
+              if (clientRef.current !== client) return;
+              setSession("active");
+            },
+            onDisconnected: () => {
+              if (clientRef.current !== client) return;
+              clientRef.current = null;
+              setSession("idle");
+              resetTalkState();
+              setAssist(EMPTY_ASSIST);
+              setActiveTrackLabel(null);
+              botTranscriptBuf.current = "";
+              if (botAudioRef.current) {
+                botAudioRef.current.pause();
+                botAudioRef.current.srcObject = null;
+              }
+            },
+            onBotStartedSpeaking: () => {
+              if (clientRef.current !== client) return;
+              setAiTalking(true);
+              botTranscriptBuf.current = "";
+            },
+            onBotStoppedSpeaking: () => {
+              if (clientRef.current !== client) return;
+              setAiTalking(false);
+              // Fallback only when server hasn't delivered a question yet — never
+              // overwrite a settled server question (prevents sidebar thrash).
+              const question = extractQuestionFromBotText(botTranscriptBuf.current);
+              if (question && question.includes("?") && question.length >= 12) {
+                setAssist((prev) =>
+                  prev.currentQuestion ? prev : { ...prev, currentQuestion: question },
+                );
+              }
+            },
+            onUserStartedSpeaking: () => {
+              if (clientRef.current !== client) return;
+              setUserTalking(true);
+            },
+            onUserStoppedSpeaking: () => {
+              if (clientRef.current !== client) return;
+              setUserTalking(false);
+            },
+            onLocalAudioLevel: (level: number) => {
+              if (clientRef.current !== client) return;
+              setLocalLevel(level);
+            },
+            onRemoteAudioLevel: (level: number) => {
+              if (clientRef.current !== client) return;
+              setRemoteLevel(level);
+            },
+            onUserTranscript: (data) => {
+              if (clientRef.current !== client) return;
+              // Server tool events own the Assist answer snippet; transcript is
+              // only a quiet fallback so Whisper partials don't flicker the panel.
+              if (!data.final || !data.text.trim()) return;
+              const snippet = data.text.trim();
+              setAssist((prev) => {
+                if (prev.grading) return prev;
+                return { ...prev, userAnswer: snippet };
+              });
+            },
+            onBotTranscript: (data) => {
+              if (clientRef.current !== client) return;
+              if (!data.text) return;
+              botTranscriptBuf.current += data.text;
+            },
+            onBotLlmText: (data) => {
+              if (clientRef.current !== client) return;
+              if (!data.text) return;
+              botTranscriptBuf.current += data.text;
+            },
+            onTrackStarted: (track, participant) => {
+              if (clientRef.current !== client) return;
+              if (track.kind !== "audio") return;
+              // Local mic should not be played back into speakers.
+              if (participant?.local) return;
+              attachBotAudio(track);
+            },
+            onServerMessage: (data: unknown) => handleServerMessage(data),
+            onError: (message) => {
+              if (clientRef.current !== client) return;
+              const detail =
+                typeof message === "object" && message && "data" in message
+                  ? JSON.stringify((message as { data?: unknown }).data)
+                  : "WebRTC connection error";
+              void (async () => {
+                await endInterview();
+                setError(detail);
+              })();
+            },
+          },
+        });
+
+        clientRef.current = client;
+        await client.initDevices();
+        if (abort.signal.aborted) {
+          await client.disconnect();
+          return;
+        }
+        await client.connect({
+          webrtcUrl: `${BACKEND_URL}/api/offer?topic=${encodeURIComponent(trackId)}`,
+        });
+        if (abort.signal.aborted) {
+          await client.disconnect();
+          return;
+        }
+        setSession("active");
+
+        // In case the remote track arrived before the callback was wired.
+        const remote = client.tracks()?.bot?.audio;
+        if (remote) attachBotAudio(remote);
+      } catch (err) {
+        if (abort.signal.aborted) {
+          if (client) {
             clientRef.current = null;
-            setLocalLevel(0);
-            setRemoteLevel(0);
-            setAssist(EMPTY_ASSIST);
-            setActiveTrackLabel(null);
-            botTranscriptBuf.current = "";
-            if (botAudioRef.current) {
-              botAudioRef.current.pause();
-              botAudioRef.current.srcObject = null;
+            try {
+              await client.disconnect();
+            } catch {
+              // Best-effort disconnect
             }
-          },
-          onBotStartedSpeaking: () => {
-            setAiTalking(true);
-            botTranscriptBuf.current = "";
-          },
-          onBotStoppedSpeaking: () => {
-            setAiTalking(false);
-            // Fallback only when server hasn't delivered a question yet — never
-            // overwrite a settled server question (prevents sidebar thrash).
-            const question = extractQuestionFromBotText(botTranscriptBuf.current);
-            if (question && question.includes("?") && question.length >= 12) {
-              setAssist((prev) =>
-                prev.currentQuestion ? prev : { ...prev, currentQuestion: question },
-              );
-            }
-          },
-          onUserStartedSpeaking: () => setUserTalking(true),
-          onUserStoppedSpeaking: () => setUserTalking(false),
-          onLocalAudioLevel: (level: number) => setLocalLevel(level),
-          onRemoteAudioLevel: (level: number) => setRemoteLevel(level),
-          onUserTranscript: (data) => {
-            // Server tool events own the Assist answer snippet; transcript is
-            // only a quiet fallback so Whisper partials don't flicker the panel.
-            if (!data.final || !data.text.trim()) return;
-            const snippet = data.text.trim();
-            setAssist((prev) => {
-              if (prev.grading || prev.userAnswer) return prev;
-              return { ...prev, userAnswer: snippet };
-            });
-          },
-          onBotTranscript: (data) => {
-            if (!data.text) return;
-            botTranscriptBuf.current += data.text;
-          },
-          onBotLlmText: (data) => {
-            if (!data.text) return;
-            botTranscriptBuf.current += data.text;
-          },
-          onTrackStarted: (track, participant) => {
-            if (track.kind !== "audio") return;
-            // Local mic should not be played back into speakers.
-            if (participant?.local) return;
-            attachBotAudio(track);
-          },
-          onServerMessage: (data: unknown) => handleServerMessage(data),
-          onError: (message) => {
-            const detail =
-              typeof message === "object" && message && "data" in message
-                ? JSON.stringify((message as { data?: unknown }).data)
-                : "WebRTC connection error";
-            setError(detail);
-            setSession("idle");
-          },
-        },
-      });
-
-      clientRef.current = client;
-      await client.initDevices();
-      await client.connect({
-        webrtcUrl: `${BACKEND_URL}/api/offer?topic=${encodeURIComponent(trackId)}`,
-      });
-      setSession("active");
-
-      // In case the remote track arrived before the callback was wired.
-      const remote = client.tracks()?.bot?.audio;
-      if (remote) attachBotAudio(remote);
-    } catch (err) {
-      clientRef.current = null;
-      setSession("idle");
-      setActiveTrackLabel(null);
-      setError(err instanceof Error ? err.message : "Unable to start interview");
-    }
-  }, [attachBotAudio, handleServerMessage]);
+          }
+          setSession("idle");
+          setActiveTrackLabel(null);
+          resetTalkState();
+          if (!userCancelledRef.current) {
+            setError(
+              err instanceof Error && err.message.includes("timed out")
+                ? "Connection timed out. Check that the backend and Ollama are running."
+                : "Unable to connect to the interview backend.",
+            );
+          }
+          return;
+        }
+        clientRef.current = null;
+        if (client) {
+          try {
+            await client.disconnect();
+          } catch {
+            // Best-effort disconnect
+          }
+        }
+        setSession("idle");
+        setActiveTrackLabel(null);
+        resetTalkState();
+        setError(err instanceof Error ? err.message : "Unable to start interview");
+      } finally {
+        window.clearTimeout(timeoutId);
+        connectAbortRef.current = null;
+      }
+    },
+    [attachBotAudio, endInterview, handleServerMessage, resetTalkState, tracks],
+  );
 
   useEffect(() => {
     return () => {
@@ -384,14 +524,16 @@ export default function HomePage() {
 
       {session === "idle" && (
         <IdleView
-          tracks={INTERVIEW_TRACKS}
+          tracks={tracks}
           selectedTrack={selectedTrack}
           onSelectTrack={setSelectedTrack}
           onStart={(trackId) => void startInterview(trackId)}
           error={error}
         />
       )}
-      {session === "connecting" && <ConnectingView />}
+      {session === "connecting" && (
+        <ConnectingView onCancel={() => void cancelConnecting()} />
+      )}
       {session === "active" && (
         <ActiveInterview
           trackLabel={activeTrackLabel}
@@ -416,9 +558,9 @@ function IdleView({
   error,
 }: {
   tracks: InterviewTrack[];
-  selectedTrack: InterviewTrackId | null;
-  onSelectTrack: (id: InterviewTrackId) => void;
-  onStart: (id: InterviewTrackId) => void;
+  selectedTrack: string | null;
+  onSelectTrack: (id: string) => void;
+  onStart: (id: string) => void;
   error: string | null;
 }) {
   return (
@@ -445,6 +587,7 @@ function IdleView({
               <li key={track.id}>
                 <button
                   type="button"
+                  aria-pressed={selected}
                   onClick={() => onSelectTrack(track.id)}
                   className={`flex w-full items-baseline justify-between gap-6 px-1 py-3 text-left transition ${
                     selected
@@ -453,13 +596,15 @@ function IdleView({
                   }`}
                 >
                   <span className="font-display text-2xl md:text-[1.75rem]">{track.label}</span>
-                  <span
-                    className={`max-w-[14rem] text-right text-xs leading-snug md:max-w-xs md:text-sm ${
-                      selected ? "text-[var(--accent)]/80" : "text-[var(--fog)]"
-                    }`}
-                  >
-                    {track.blurb}
-                  </span>
+                  {track.blurb ? (
+                    <span
+                      className={`max-w-[14rem] text-right text-xs leading-snug md:max-w-xs md:text-sm ${
+                        selected ? "text-[var(--accent)]/80" : "text-[var(--fog)]"
+                      }`}
+                    >
+                      {track.blurb}
+                    </span>
+                  ) : null}
                 </button>
               </li>
             );
@@ -478,7 +623,7 @@ function IdleView({
         </button>
         <span className="text-sm text-[var(--fog)]">
           {selectedTrack
-            ? INTERVIEW_TRACKS.find((t) => t.id === selectedTrack)?.label
+            ? tracks.find((t) => t.id === selectedTrack)?.label
             : "Select a track to continue"}
         </span>
       </div>
@@ -491,7 +636,7 @@ function IdleView({
   );
 }
 
-function ConnectingView() {
+function ConnectingView({ onCancel }: { onCancel: () => void }) {
   return (
     <section className="relative z-10 mx-auto flex min-h-[80vh] max-w-lg flex-col items-center justify-center text-center">
       <div className="loading-shimmer mb-6 h-1.5 w-48 rounded-full" />
@@ -499,6 +644,13 @@ function ConnectingView() {
       <p className="mt-3 text-[var(--fog)]">
         Peer-to-peer SmallWebRTC handshake with the local Pipecat agent.
       </p>
+      <button
+        type="button"
+        onClick={onCancel}
+        className="mt-8 rounded-md border border-[var(--cream)]/25 px-5 py-2.5 text-sm font-medium text-[var(--cream)] transition hover:border-[var(--danger)] hover:text-[var(--danger)]"
+      >
+        Cancel
+      </button>
     </section>
   );
 }
@@ -549,16 +701,18 @@ function ActiveInterview({
         <div className="flex flex-col items-center justify-center gap-10 md:flex-row md:items-center md:justify-between lg:flex-col lg:items-center xl:flex-row">
           <div className="relative flex h-64 w-64 items-center justify-center md:h-72 md:w-72">
             <div
-              className={`absolute inset-0 rounded-full border border-[var(--accent)]/30 ${
-                aiTalking || userTalking ? "ring-pulse" : ""
-              }`}
-              style={{
-                boxShadow: `0 0 ${24 + activeLevel * 60}px rgba(61, 255, 168, ${0.15 + activeLevel * 0.45})`,
-                transform: `scale(${ringScale})`,
-                transition: "transform 80ms linear, box-shadow 80ms linear",
-                borderColor: userTalking ? "var(--ring-user)" : "var(--ring-ai)",
-              }}
-            />
+              className={`absolute inset-0 ${aiTalking || userTalking ? "ring-pulse" : ""}`}
+            >
+              <div
+                className="absolute inset-0 rounded-full border border-[var(--accent)]/30"
+                style={{
+                  boxShadow: `0 0 ${24 + activeLevel * 60}px rgba(61, 255, 168, ${0.15 + activeLevel * 0.45})`,
+                  transform: `scale(${ringScale})`,
+                  transition: "transform 80ms linear, box-shadow 80ms linear",
+                  borderColor: userTalking ? "var(--ring-user)" : "var(--ring-ai)",
+                }}
+              />
+            </div>
             <div
               className="absolute inset-6 rounded-full border border-[var(--cream)]/10 bg-[var(--panel)]/80 backdrop-blur-sm"
               style={{

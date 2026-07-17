@@ -1,4 +1,4 @@
-# System Design Interview Coach
+# Moss Interview Coach
 
 Real-time voice interview coach grounded by **Moss** sub-10ms hybrid retrieval. Voice runs fully local:
 
@@ -38,10 +38,12 @@ cp .env.example .env
 #   MOSS_PROJECT_ID=...
 #   MOSS_PROJECT_KEY=...
 python ingest_knowledge.py
-uvicorn server:app --reload --port 8000
+python server.py
 ```
 
-First conversation may download Whisper / Piper models. Health: `GET http://localhost:8000/health`
+`server.py` loads `.env` via `python-dotenv` and starts uvicorn with `BACKEND_HOST` / `BACKEND_PORT` (defaults `0.0.0.0:8000`).
+
+First conversation may download Whisper / Piper models. Health: `GET http://localhost:8000/health` (or your configured `BACKEND_PORT`)
 
 Re-ingest rubrics (all tracks by default):
 

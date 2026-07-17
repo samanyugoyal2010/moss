@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import url("https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap");
 
 :root {
   --ink: #0c1210;
@@ -12,8 +11,8 @@
   --danger: #ff6b6b;
   --ring-user: #5eead4;
   --ring-ai: #3dffa8;
-  --font-display: "Instrument Serif", Georgia, serif;
-  --font-body: "DM Sans", system-ui, sans-serif;
+  --font-display: var(--font-instrument-serif), Georgia, serif;
+  --font-body: var(--font-dm-sans), system-ui, sans-serif;
 }
 
 * {
@@ -121,4 +120,14 @@ body {
 
 .interrupt-flash {
   animation: flash-interrupt 0.9s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring-pulse,
+  .loading-shimmer,
+  .assist-panel,
+  .assist-grading,
+  .interrupt-flash {
+    animation: none;
+  }
 }
