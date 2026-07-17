@@ -42,9 +42,10 @@ to recall them, and ask for a recommendation.
 For a public deploy, set server-only `APP_SECRET` in `web/.env.local`. Visitors enter
 that code once; the app stores an httpOnly gate cookie and then mints tokens. Leave it
 unset for open local demos. Do not use a `NEXT_PUBLIC_*` secret — anything shipped to
-the browser cannot protect `/api/token`. For per-IP unlock/token limits, set exactly one
-`TRUSTED_CLIENT_IP_HEADER` (`cf-connecting-ip`, `x-vercel-forwarded-for`, or a replaced
-`x-real-ip`) — do not rely on `X-Forwarded-For`. Otherwise limits share one global bucket.
+the browser cannot protect `/api/token`. For per-IP unlock/token limits, configure exactly one
+trusted header only when every request passes through an edge/proxy that overwrites it:
+`cf-connecting-ip`, `x-vercel-forwarded-for`, or `x-real-ip`. Do not rely on
+`X-Forwarded-For`. Otherwise limits share one global bucket.
 Prefer an edge rate limit in front of any public deployment as well.
 
 ## How it works
