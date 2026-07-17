@@ -54,7 +54,7 @@ cd web
 npm install
 # create once; do not overwrite an existing Cloud-configured .env.local
 [ -f .env.local ] || cp .env.local.example .env.local
-npm run dev            # → http://127.0.0.1:3000 (loopback-only; use `npm run dev:lan` + ALLOW_REMOTE_TOKEN=1 for LAN)
+npm run dev            # → http://127.0.0.1:3000 (loopback-only; `npm run dev:lan` enables LAN + ALLOW_REMOTE_TOKEN)
 ```
 
 Open http://127.0.0.1:3000, click **Start the demo**, and talk. The right-hand panel
@@ -74,7 +74,7 @@ on the `moss.retrieval` data channel:
   "query": "string",
   "docs": [{ "id": "string | null (optional)", "text": "string", "score": 0.0 }],
   "took_ms": 0.0,
-  "region": "US | EU (optional)"
+  "region": "US | EU"
 }
 ```
 

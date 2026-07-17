@@ -26,7 +26,7 @@ function parseRetrievalPayload(value: unknown): RetrievalPayload | null {
   if (typeof raw.query !== "string") return null;
   if (!Array.isArray(raw.docs) || !raw.docs.every(isRetrievalDoc)) return null;
   if (typeof raw.took_ms !== "number" || Number.isNaN(raw.took_ms)) return null;
-  if (raw.region !== undefined && typeof raw.region !== "string") return null;
+  if (typeof raw.region !== "string" || !raw.region) return null;
   return {
     query: raw.query,
     docs: raw.docs,
@@ -62,7 +62,8 @@ export function RetrievalPanel() {
           console.error("invalid moss.retrieval payload shape");
           return;
         }
-        if (parsed.region && parsed.region !== filterRegionRef.current) return;
+        // region is mandatory — drop mismatches (and never accept untagged payloads).
+        if (parsed.region !== filterRegionRef.current) return;
         setData(parsed);
       } catch (err) {
         console.error("failed to parse moss.retrieval payload", err);
@@ -87,7 +88,7 @@ export function RetrievalPanel() {
   );
 
   const runRegionOp = useCallback(
-    (r: Region, opts: { clearResults: boolean; failMessage: string; rollbackTo?: Region }) => {
+    (r: Region, opts: { clearResults: boolean; failMessage: string }) => {
       const opId = ++opIdRef.current;
       filterRegionRef.current = r;
       setRegion(r);
@@ -97,25 +98,33 @@ export function RetrievalPanel() {
       publishChainRef.current = publishChainRef.current
         .catch(() => undefined)
         .then(async () => {
-          if (opId !== opIdRef.current) return;
+          // Always run the publish (chain serializes). Record successful agent
+          // sync even if a newer op has superseded this one for UI updates.
           const ok = await publishRegion(r);
+          if (ok) {
+            committedRegionRef.current = r;
+          }
+
           if (opId !== opIdRef.current) return;
+
           if (!ok) {
-            const rollback = opts.rollbackTo ?? committedRegionRef.current;
+            // Roll back to whatever the agent last successfully accepted.
+            const rollback = committedRegionRef.current;
             filterRegionRef.current = rollback;
             setRegion(rollback);
             setRegionError(opts.failMessage);
             return;
           }
-          committedRegionRef.current = r;
+
           filterRegionRef.current = r;
+          setRegion(r);
           setRegionError(null);
         });
     },
     [publishRegion],
   );
 
-  // Sync the agent to the committed picker region whenever we connect or the agent joins.
+  // Sync the agent to the picker whenever we connect or the agent joins.
   useEffect(() => {
     if (connState !== ConnectionState.Connected) return;
     const sync = () => {
@@ -124,7 +133,6 @@ export function RetrievalPanel() {
       runRegionOp(filterRegionRef.current, {
         clearResults: false,
         failMessage: "Couldn't sync region with the agent — try again.",
-        rollbackTo: committedRegionRef.current,
       });
     };
     sync();
@@ -140,7 +148,6 @@ export function RetrievalPanel() {
     runRegionOp(r, {
       clearResults: true,
       failMessage: "Couldn't update region — try again.",
-      rollbackTo: committedRegionRef.current,
     });
   };
 

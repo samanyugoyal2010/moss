@@ -164,28 +164,43 @@ class MossSemanticRetrievalAgent(Agent):
             raise StopResponse()
 
         logger.info(f"User asked: {user_query}")
-        # Snapshot once per turn so filter + panel stay aligned if the picker changes mid-query.
-        region = self.region
 
         try:
-            results, took_ms = await self._query_moss(user_query, region)
-
-            # Picker changed while moss.query was in flight — drop stale region results
-            # and answer for the region the UI now shows.
-            if self.region != region:
-                logger.info(
-                    "Region changed during retrieval (%s → %s); re-querying",
-                    region,
-                    self.region,
-                )
+            # Re-query / re-publish until the region is still current after every await,
+            # so a mid-turn picker change cannot leave the spoken answer on the old region.
+            results = None
+            took_ms = 0.0
+            region = self.region
+            for _attempt in range(4):
                 region = self.region
                 results, took_ms = await self._query_moss(user_query, region)
+                if self.region != region:
+                    logger.info(
+                        "Region changed during retrieval (%s → %s); retrying",
+                        region,
+                        self.region,
+                    )
+                    continue
 
-            # 2. Stream the retrieval to the web UI (the Moss knowledge-base panel)
-            await self._publish_retrieval(user_query, results, took_ms, region)
+                await self._publish_retrieval(user_query, results, took_ms, region)
+                if self.region != region:
+                    logger.info(
+                        "Region changed during retrieval publish (%s → %s); retrying",
+                        region,
+                        self.region,
+                    )
+                    continue
+                break
+            else:
+                # Exhausted retries while the picker kept moving — stay grounded.
+                region = self.region
+                await self._publish_retrieval(user_query, None, 0.0, region)
+                turn_ctx.add_message(role="system", content=NO_MATCH_CONTEXT)
+                await super().on_user_turn_completed(turn_ctx, new_message)
+                return
 
-            # 3. Context Injection
-            if results.docs:
+            # 3. Context Injection (region still matches after query + publish)
+            if results and results.docs:
                 context_str = "\n".join([f"- {d.text}" for d in results.docs])
                 injection = (
                     f"Relevant information:\n{context_str}\n\n"
@@ -201,7 +216,7 @@ class MossSemanticRetrievalAgent(Agent):
         except Exception as e:
             logger.error(f"Moss search failed: {e}", exc_info=True)
             # Clear stale panel docs and keep the reply grounded when retrieval fails.
-            await self._publish_retrieval(user_query, None, 0.0, region)
+            await self._publish_retrieval(user_query, None, 0.0, self.region)
             turn_ctx.add_message(role="system", content=NO_MATCH_CONTEXT)
 
         # 3. Proceed with standard generation

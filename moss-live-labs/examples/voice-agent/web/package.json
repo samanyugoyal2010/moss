@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -H 127.0.0.1",
-    "dev:lan": "next dev",
+    "dev": "MOSS_LISTEN_HOST=127.0.0.1 next dev -H 127.0.0.1",
+    "dev:lan": "ALLOW_REMOTE_TOKEN=1 next dev",
     "build": "next build",
-    "start": "next start -H 127.0.0.1",
+    "start": "MOSS_LISTEN_HOST=127.0.0.1 next start -H 127.0.0.1",
     "lint": "eslint ."
   },
   "dependencies": {

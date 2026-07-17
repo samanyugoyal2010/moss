@@ -9,5 +9,6 @@ export type RetrievalPayload = {
   query: string;
   docs: RetrievalDoc[];
   took_ms: number;
-  region?: string;
+  /** Region used for the Moss filter on this turn (required). */
+  region: string;
 };
