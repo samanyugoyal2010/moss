@@ -148,8 +148,10 @@ examples/
     ├── haystack/            # Haystack retriever
     ├── autogen/             # AutoGen integration
     ├── mastra/              # Mastra retriever
+    ├── langflow/            # Langflow drag-and-drop retriever
     ├── pydantic-ai/         # Pydantic AI integration
-    └── daytona/             # Daytona sandbox example
+    ├── daytona/             # Daytona sandbox example
+     └── vercel-ai-sdk/       # Vercel AI SDK RAG agent example
 
 apps/
 ├── next-js/                 # Next.js semantic search UI
@@ -159,6 +161,8 @@ apps/
 ├── livekit-moss-vercel/     # LiveKit voice agent on Vercel
 ├── agora-moss/              # Agora Conversational AI MCP server with Moss retrieval
 ├── moss-llamaindex/         # LlamaIndex RAG backend + frontend
+├── moss-interview-coach/    # Local voice interview coach (Pipecat + Ollama + Moss rubrics)
+├── moss-vscode/             # VS Code extension for local semantic code search
 ├── moss-bun/                # Bun runtime example
 └── docker/                  # Dockerized examples (ECS/K8s pattern)
 
@@ -218,6 +222,24 @@ cd apps/pipecat-moss/ollama-local
 docker compose up
 ```
 
+### Run the system design interview coach
+
+A local Pipecat voice coach that grades system-design answers against Moss-retrieved rubrics (Whisper + Ollama + Piper, Next.js assist UI).
+
+```bash
+cd apps/moss-interview-coach
+# See README for backend + frontend setup
+```
+
+### Run the Moss VS Code extension
+
+Local semantic code search over the active workspace (persisted indexes, optional cloud sync).
+
+```bash
+cd apps/moss-vscode
+# See README for packaging, F5 launch, and publish steps
+```
+
 Full API reference: [docs.moss.dev](https://docs.moss.dev).
 
 ## Integrations
@@ -238,9 +260,10 @@ Full API reference: [docs.moss.dev](https://docs.moss.dev).
 | [ElevenLabs](https://elevenlabs.io) | Available | [`apps/elevenlabs-moss/`](apps/elevenlabs-moss/) |
 | [Agora](https://www.agora.io/) | Available | [`apps/agora-moss/`](apps/agora-moss/) |
 | [Strands Agents](https://github.com/strands-agents/sdk-python) | Available | [`packages/strands-agents-moss/`](packages/strands-agents-moss/) |
+| [Langflow](https://github.com/langflow-ai/langflow) | Available | [`examples/cookbook/langflow/`](examples/cookbook/langflow/) |
 | [Next.js](https://nextjs.org) | Available | [`apps/next-js/`](apps/next-js/) |
 | [VitePress](https://vitepress.dev) | Available | [`packages/vitepress-plugin-moss/`](packages/vitepress-plugin-moss/) |
-| [Vercel AI SDK](https://sdk.vercel.ai) | Available | [`packages/vercel-sdk/`](packages/vercel-sdk/) |
+| [Vercel AI SDK](https://sdk.vercel.ai) | Available | [`examples/cookbook/vercel-ai-sdk/`](examples/cookbook/vercel-ai-sdk/) |
 
 ## Architecture
 
