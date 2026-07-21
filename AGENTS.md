@@ -65,6 +65,7 @@ packages/
   strands-agents-moss/   — AWS Strands Agents integration package
   ten-moss/              — TEN Framework Moss session manager (MossSessionManager)
   vapi-moss/             — VAPI Custom Knowledge Base webhook adapter
+  n8n-nodes-moss/        — n8n community node for Moss index + query
   vercel-sdk/            — Vercel AI SDK tool wrappers (@moss-tools/vercel-sdk)
   vitepress-plugin-moss/ — VitePress search plugin (on-device fallback after cloud)
   zo-computer/           — Zo computer skill for Moss search
@@ -142,6 +143,7 @@ asks for an experimental landing spot.
 | `strands-agents-moss/` | `strands-agents-moss` | Moss tool for AWS Strands Agents |
 | `ten-moss/` | `ten-moss` | `MossSessionManager` — session-scoped Moss grounding for TEN Framework control extensions |
 | `vapi-moss/` | `vapi-moss` | `MossVapiSearch` adapter + HMAC webhook verification for VAPI |
+| `n8n-nodes-moss/` | `n8n-nodes-moss` | n8n community node: create index, add/delete docs, list/get/delete indexes, query |
 | `vercel-sdk/` | `@moss-tools/vercel-sdk` | Vercel AI SDK 6 `tool()` wrappers: search, create index, manage documents |
 | `vitepress-plugin-moss/` | `vitepress-plugin-moss` | VitePress plugin: cloud search on first keystroke, on-device after index download |
 | `zo-computer/` | (internal) | Zo computer skill backed by Moss search |
