@@ -17,7 +17,7 @@ const pkg = require('./package.json');
 const withMoss = (config) => {
   config = withPodfileProperties(config, (cfg) => {
     cfg.modResults['ios.deploymentTarget'] =
-      cfg.modResults['ios.deploymentTarget'] || '15.1';
+      cfg.modResults['ios.deploymentTarget'] || '16.4';
     return cfg;
   });
   return config;

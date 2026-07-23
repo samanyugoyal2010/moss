@@ -77,8 +77,11 @@ Session / Authenticator APIs from the Swift SDK are intentionally out of scope f
 ## Requirements
 
 - Expo SDK 54+ (or a React Native app with Expo Modules)
-- iOS 15.1+
+- iOS 16.4+ (Expo SDK 54+ baseline)
 - Xcode 15+
+- Apple Silicon Mac for the iOS Simulator (the Moss.xcframework simulator slice is arm64-only)
+- A development build / `expo prebuild` — Expo Go is not supported
+- Until this package is published to npm, install from a local path or git checkout (`file:…` / `github:…`)
 
 ## Development (this monorepo)
 
