@@ -129,13 +129,22 @@ class InterviewAssistState:
         self._grade_tasks: set[asyncio.Task[None]] = set()
         self._grade_lock = asyncio.Lock()
 
+    def cancel_grades(self) -> list[asyncio.Task[None]]:
+        """Cancel in-flight grade tasks so subprocess workers are torn down."""
+        tasks = list(self._grade_tasks)
+        for task in tasks:
+            task.cancel()
+        return tasks
+
     def begin_grading(self) -> int:
         """Start a new grading turn; invalidates any in-flight grade."""
+        self.cancel_grades()
         self._grade_generation += 1
         return self._grade_generation
 
     def invalidate_grading(self) -> None:
         """Discard in-flight grading (e.g. after barge-in)."""
+        self.cancel_grades()
         self._grade_generation += 1
 
     def grading_still_current(self, turn_id: int) -> bool:
@@ -785,9 +794,7 @@ async def run_interview_bot(
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport: SmallWebRTCTransport, client: Any) -> None:
             logger.info("Client disconnected; ending pipeline.")
-            grade_tasks = list(assist_state._grade_tasks)
-            for task in grade_tasks:
-                task.cancel()
+            grade_tasks = assist_state.cancel_grades()
             if grade_tasks:
                 await asyncio.gather(*grade_tasks, return_exceptions=True)
             await worker.cancel()
