@@ -354,7 +354,7 @@ export default function HomePage() {
           );
         }
 
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted) throw abortReason(abort.signal);
 
         client = new PipecatClient({
           transport: new SmallWebRTCTransport({
@@ -446,7 +446,12 @@ export default function HomePage() {
               if (participant?.local) return;
               attachBotAudio(track);
             },
-            onServerMessage: (data: unknown) => handleServerMessage(data),
+            onServerMessage: (data: unknown) => {
+              // Same guard as every other callback: a late data-channel message
+              // from a disconnected client must not mutate a newer interview.
+              if (clientRef.current !== client) return;
+              handleServerMessage(data);
+            },
             onError: (message) => {
               if (clientRef.current !== client) return;
               const detail =
@@ -466,20 +471,17 @@ export default function HomePage() {
         // them bare would hang past CONNECT_TIMEOUT_MS if WebRTC negotiation
         // stalls, leaving the UI stuck on "connecting" forever.
         await withAbort(client.initDevices(), abort.signal);
-        if (abort.signal.aborted) {
-          await client.disconnect();
-          return;
-        }
+        // Throw rather than return: a bare return skips the catch branch that
+        // tears the client down and puts the UI back to idle, which would strand
+        // it on "connecting" if the timeout landed in this window.
+        if (abort.signal.aborted) throw abortReason(abort.signal);
         await withAbort(
           client.connect({
             webrtcUrl: `${BACKEND_URL}/api/offer?topic=${encodeURIComponent(trackId)}`,
           }),
           abort.signal,
         );
-        if (abort.signal.aborted) {
-          await client.disconnect();
-          return;
-        }
+        if (abort.signal.aborted) throw abortReason(abort.signal);
         setSession("active");
 
         // In case the remote track arrived before the callback was wired.

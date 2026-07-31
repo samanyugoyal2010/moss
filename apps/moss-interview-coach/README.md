@@ -41,7 +41,13 @@ python ingest_knowledge.py
 python server.py
 ```
 
-`server.py` loads `.env` via `python-dotenv` and starts uvicorn with `BACKEND_HOST` / `BACKEND_PORT` (defaults `0.0.0.0:8000`).
+`server.py` loads `.env` via `python-dotenv` and starts uvicorn with `BACKEND_HOST` / `BACKEND_PORT` (defaults `127.0.0.1:8000`).
+
+> [!WARNING]
+> `/api/offer` is unauthenticated, and CORS does not stop non-browser callers.
+> Every call starts local Whisper/Ollama/Piper work and grader subprocesses, so
+> the backend binds to loopback by default. Set `BACKEND_HOST=0.0.0.0` only when
+> you deliberately want to expose it, and put authentication in front of it.
 
 First conversation may download Whisper / Piper models. Health: `GET http://localhost:8000/health` (or your configured `BACKEND_PORT`)
 
@@ -77,7 +83,7 @@ Open [http://localhost:3000](http://localhost:3000) → pick a track (**System D
 | `WHISPER_DEVICE` | no | `auto` |
 | `PIPER_VOICE` | no | `en_US-lessac-medium` |
 | `GRADE_SUBPROCESS_TIMEOUT_SECS` | no | `60` |
-| `BACKEND_HOST` | no | `0.0.0.0` |
+| `BACKEND_HOST` | no | `127.0.0.1` |
 | `BACKEND_PORT` | no | `8000` |
 | `CORS_ORIGINS` | no | `http://localhost:3000` |
 | `NEXT_PUBLIC_BACKEND_URL` | no | `http://localhost:8000` |

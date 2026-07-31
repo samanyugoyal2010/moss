@@ -203,6 +203,12 @@ class MossContextInjector(FrameProcessor):
 
         if not results.docs:
             logger.info(f"Moss returned no docs ({self.last_moss_ms:.2f} ms)")
+            # Same reset as the failure path above: leaving the previous rubric
+            # cached would let this turn — and the grader — score against a
+            # topic the candidate is no longer being asked about.
+            self.last_rubric_id = None
+            self.last_rubric_text = None
+            _upsert_system_message(frame.context, self._system_prompt)
             return
 
         top = results.docs[0]
@@ -942,9 +948,14 @@ async def offer_patch(request: Request) -> dict[str, str]:
 if __name__ == "__main__":
     import uvicorn
 
+    # Loopback by default. /api/offer is unauthenticated and CORS does not stop
+    # non-browser callers, so binding every interface would let anyone on the
+    # network start Whisper/Ollama/Piper work and grader subprocesses on this
+    # machine — and spend the project's Moss quota. Set BACKEND_HOST explicitly
+    # (e.g. 0.0.0.0) to expose it on purpose.
     uvicorn.run(
         "server:app",
-        host=os.getenv("BACKEND_HOST", "0.0.0.0"),
+        host=os.getenv("BACKEND_HOST", "127.0.0.1"),
         port=int(os.getenv("BACKEND_PORT", "8000")),
         reload=True,
     )
