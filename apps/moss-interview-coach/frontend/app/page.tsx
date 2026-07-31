@@ -324,6 +324,12 @@ export default function HomePage() {
         abort.abort(new DOMException("Connection timed out", "AbortError"));
       }, CONNECT_TIMEOUT_MS);
 
+      // True while this call still owns the session. Cancelling during an await
+      // and immediately starting another interview leaves this one running with
+      // a stale controller; when its rejection finally lands it must not reset
+      // the newer attempt to idle, steal its client, or clear its controller.
+      const ownsSession = () => connectAbortRef.current === abort;
+
       let client: PipecatClient | null = null;
 
       try {
@@ -482,24 +488,40 @@ export default function HomePage() {
           abort.signal,
         );
         if (abort.signal.aborted) throw abortReason(abort.signal);
+        // A newer interview may have taken over while we were connecting.
+        // Retire quietly rather than presenting this one as the live session.
+        if (!ownsSession()) {
+          if (clientRef.current === client) clientRef.current = null;
+          try {
+            await client.disconnect();
+          } catch {
+            // Best-effort disconnect
+          }
+          return;
+        }
         setSession("active");
 
         // In case the remote track arrived before the callback was wired.
         const remote = client.tracks()?.bot?.audio;
         if (remote) attachBotAudio(remote);
       } catch (err) {
-        if (abort.signal.aborted) {
-          if (client) {
-            clientRef.current = null;
-            try {
-              await client.disconnect();
-            } catch {
-              // Best-effort disconnect
-            }
+        // Always tear down our own client, even when stale.
+        if (client) {
+          if (clientRef.current === client) clientRef.current = null;
+          try {
+            await client.disconnect();
+          } catch {
+            // Best-effort disconnect
           }
-          setSession("idle");
-          setActiveTrackLabel(null);
-          resetTalkState();
+        }
+        // Stale: a newer startInterview owns the UI, so neither reset it to
+        // idle nor surface this attempt's error over the new one.
+        if (!ownsSession()) return;
+
+        setSession("idle");
+        setActiveTrackLabel(null);
+        resetTalkState();
+        if (abort.signal.aborted) {
           if (!userCancelledRef.current) {
             setError(
               err instanceof Error && err.message.includes("timed out")
@@ -509,21 +531,12 @@ export default function HomePage() {
           }
           return;
         }
-        clientRef.current = null;
-        if (client) {
-          try {
-            await client.disconnect();
-          } catch {
-            // Best-effort disconnect
-          }
-        }
-        setSession("idle");
-        setActiveTrackLabel(null);
-        resetTalkState();
         setError(err instanceof Error ? err.message : "Unable to start interview");
       } finally {
         window.clearTimeout(timeoutId);
-        connectAbortRef.current = null;
+        // Only if still ours — clearing a newer attempt's controller would make
+        // it uncancellable.
+        if (ownsSession()) connectAbortRef.current = null;
       }
     },
     [attachBotAudio, endInterview, handleServerMessage, resetTalkState, tracks],
