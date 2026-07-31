@@ -65,6 +65,30 @@ const INTERVIEW_TRACKS: InterviewTrack[] = [
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 const CONNECT_TIMEOUT_MS = 30_000;
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("Connection timed out", "AbortError");
+}
+
+/**
+ * Settle as soon as either `promise` resolves/rejects or `signal` aborts.
+ *
+ * For APIs that take no AbortSignal of their own. The underlying promise is
+ * left attached so a later rejection is still handled rather than surfacing as
+ * an unhandled rejection; the caller is expected to tear the client down.
+ */
+function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(abortReason(signal));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
 function parseDataPayload(data: unknown): Record<string, unknown> | null {
   try {
     if (typeof data === "string") {
@@ -438,14 +462,20 @@ export default function HomePage() {
         });
 
         clientRef.current = client;
-        await client.initDevices();
+        // These do not take an AbortSignal, so race them against it. Awaiting
+        // them bare would hang past CONNECT_TIMEOUT_MS if WebRTC negotiation
+        // stalls, leaving the UI stuck on "connecting" forever.
+        await withAbort(client.initDevices(), abort.signal);
         if (abort.signal.aborted) {
           await client.disconnect();
           return;
         }
-        await client.connect({
-          webrtcUrl: `${BACKEND_URL}/api/offer?topic=${encodeURIComponent(trackId)}`,
-        });
+        await withAbort(
+          client.connect({
+            webrtcUrl: `${BACKEND_URL}/api/offer?topic=${encodeURIComponent(trackId)}`,
+          }),
+          abort.signal,
+        );
         if (abort.signal.aborted) {
           await client.disconnect();
           return;

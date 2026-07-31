@@ -13,7 +13,7 @@ import os
 import re
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -266,8 +266,42 @@ class CoachQuestionEmitter(FrameProcessor):
         )
 
 
+class BotSpeechTracker(FrameProcessor):
+    """Track whether the coach is currently speaking.
+
+    Sits *downstream* of ``transport.output()``, which is what emits
+    ``BotStartedSpeakingFrame`` / ``BotStoppedSpeakingFrame``. Keeping this
+    separate from :class:`InterruptionBridge` matters: the bridge has to stay
+    upstream of the output transport so its ``RTVIServerMessageFrame`` pushes
+    reach the client, but that is the wrong place to *learn* about bot speech
+    from. Pipecat currently broadcasts these frames upstream as well, so the
+    bridge would happen to see them, but that is an implementation detail we
+    should not depend on.
+    """
+
+    def __init__(self, assist_state: InterviewAssistState) -> None:
+        super().__init__()
+        self._assist = assist_state
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._assist.bot_speaking = True
+
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            self._assist.bot_speaking = False
+
+        await self.push_frame(frame, direction)
+
+
 class InterruptionBridge(FrameProcessor):
-    """Publish barge-in events and track when the coach is speaking."""
+    """Publish barge-in events to the client.
+
+    Must stay upstream of ``transport.output()``: the ``RTVIServerMessageFrame``
+    it pushes downstream only reaches the client by flowing into the output
+    transport. Bot-speech state is owned by :class:`BotSpeechTracker`.
+    """
 
     def __init__(self, assist_state: InterviewAssistState) -> None:
         super().__init__()
@@ -283,12 +317,6 @@ class InterruptionBridge(FrameProcessor):
         if isinstance(frame, InterruptionFrame) and self._assist.bot_speaking:
             self._assist.invalidate_grading()
             await self._emit({"type": "interruption", "interrupted": True})
-
-        if isinstance(frame, BotStartedSpeakingFrame):
-            self._assist.bot_speaking = True
-
-        if isinstance(frame, BotStoppedSpeakingFrame):
-            self._assist.bot_speaking = False
 
         await self.push_frame(frame, direction)
 
@@ -487,6 +515,20 @@ def _grade_result_from_worker_payload(
     )
 
 
+async def _terminate_grader(proc: asyncio.subprocess.Process) -> None:
+    """Kill a grader subprocess and reap it. Best-effort; never raises.
+
+    ``asyncio.shield`` keeps the reap alive when the caller is already being
+    cancelled, so the process is collected rather than left as a zombie.
+    """
+    if proc.returncode is not None:
+        return
+    with suppress(ProcessLookupError, OSError):
+        proc.kill()
+    with suppress(asyncio.CancelledError, asyncio.TimeoutError, OSError):
+        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=5.0)
+
+
 async def _grade_in_subprocess(
     *,
     question: str,
@@ -523,11 +565,19 @@ async def _grade_in_subprocess(
             timeout=GRADE_SUBPROCESS_TIMEOUT_SECS,
         )
     except asyncio.TimeoutError as exc:
-        proc.kill()
-        await proc.wait()
+        await _terminate_grader(proc)
         raise TimeoutError(
             f"Grader subprocess timed out after {GRADE_SUBPROCESS_TIMEOUT_SECS:.0f}s"
         ) from exc
+    except asyncio.CancelledError:
+        # on_client_disconnected cancels every in-flight grade. Without this the
+        # CancelledError would propagate straight out of communicate() and leave
+        # grader_worker.py — and its Ollama request — running past the session.
+        await _terminate_grader(proc)
+        raise
+    except BaseException:
+        await _terminate_grader(proc)
+        raise
 
     err_text = (stderr or b"").decode("utf-8", errors="replace").strip()
     if proc.returncode != 0:
@@ -646,6 +696,7 @@ async def run_interview_bot(
 
         question_emitter = CoachQuestionEmitter(assist_state)
         interruption_bridge = InterruptionBridge(assist_state)
+        bot_speech_tracker = BotSpeechTracker(assist_state)
 
         pipeline = Pipeline(
             [
@@ -655,9 +706,13 @@ async def run_interview_bot(
                 moss_injector,
                 llm,
                 question_emitter,
+                # Upstream of the output transport so its RTVI messages reach the client.
                 interruption_bridge,
                 tts,
                 transport.output(),
+                # Downstream of the output transport, which is what emits the
+                # Bot{Started,Stopped}SpeakingFrame this reads.
+                bot_speech_tracker,
                 assistant_aggregator,
             ]
         )
