@@ -739,7 +739,24 @@ async def run_interview_bot(
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport: SmallWebRTCTransport, client: Any) -> None:
             logger.info(f"Client connected over SmallWebRTC (track={track_id})")
-            await asyncio.sleep(0.6)
+
+        # Greet on the RTVI ready handshake rather than a fixed sleep after the
+        # WebRTC connect. A transport-level connection does not mean the RTVI
+        # client is listening yet, so a slow connect could swallow the opening
+        # question and its audio. `on_client_ready` is exactly that signal.
+        # PipelineWorker enables RTVI by default and add_event_handler appends,
+        # so this runs alongside pipecat's own set_bot_ready() handler.
+        greeted = False
+
+        @worker.rtvi.event_handler("on_client_ready")
+        async def on_client_ready(rtvi: Any) -> None:
+            # A client that re-sends ready (reconnect) must not replay the
+            # welcome over an interview already in progress.
+            nonlocal greeted
+            if greeted:
+                return
+            greeted = True
+            logger.info(f"RTVI client ready (track={track_id}); sending welcome")
             welcome = track["welcome"]
             assist_state.bot_buf = [welcome + " "]
             assist_state.last_question = _extract_question(
@@ -885,6 +902,19 @@ async def list_tracks() -> dict[str, Any]:
     }
 
 
+async def _json_object_body(request: Request) -> dict[str, Any]:
+    """Parse a JSON object body, reporting bad input as 400 rather than 500."""
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400, detail="Request body must be valid JSON"
+        ) from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    return body
+
+
 @app.post("/api/offer")
 async def offer(request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
     try:
@@ -906,7 +936,7 @@ async def offer(request: Request, background_tasks: BackgroundTasks) -> dict[str
             detail=f"Grader worker missing at {GRADER_WORKER_PATH.name}.",
         )
 
-    body = await request.json()
+    body = await _json_object_body(request)
 
     async def webrtc_connection_callback(connection: SmallWebRTCConnection) -> None:
         background_tasks.add_task(run_interview_bot, connection, track_id)
@@ -916,6 +946,15 @@ async def offer(request: Request, background_tasks: BackgroundTasks) -> dict[str
             request=SmallWebRTCRequest.from_dict(body),
             webrtc_connection_callback=webrtc_connection_callback,
         )
+    except HTTPException:
+        # Already carries an intended status; do not flatten it to a 500.
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        # A malformed offer is the caller's mistake, not a server fault.
+        logger.warning(f"Malformed WebRTC offer: {exc}")
+        raise HTTPException(
+            status_code=422, detail=f"Malformed WebRTC offer: {exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to handle WebRTC offer")
         raise HTTPException(
@@ -928,14 +967,33 @@ async def offer(request: Request, background_tasks: BackgroundTasks) -> dict[str
 
 @app.patch("/api/offer")
 async def offer_patch(request: Request) -> dict[str, str]:
-    body = await request.json()
+    body = await _json_object_body(request)
+
+    pc_id = body.get("pc_id")
+    if not isinstance(pc_id, str) or not pc_id:
+        raise HTTPException(status_code=400, detail="pc_id is required and must be a string")
+
+    raw_candidates = body.get("candidates", [])
+    if not isinstance(raw_candidates, list):
+        raise HTTPException(status_code=400, detail="candidates must be a list")
+    try:
+        candidates = [IceCandidate(**c) for c in raw_candidates]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Malformed ICE candidate: {exc}"
+        ) from exc
+
     try:
         await small_webrtc_handler.handle_patch_request(
-            SmallWebRTCPatchRequest(
-                pc_id=body["pc_id"],
-                candidates=[IceCandidate(**c) for c in body.get("candidates", [])],
-            )
+            SmallWebRTCPatchRequest(pc_id=pc_id, candidates=candidates)
         )
+    except HTTPException:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning(f"Malformed ICE patch request: {exc}")
+        raise HTTPException(
+            status_code=422, detail=f"Malformed ICE patch request: {exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to patch WebRTC ICE candidates")
         raise HTTPException(
